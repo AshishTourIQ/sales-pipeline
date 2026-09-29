@@ -1,0 +1,15 @@
+# Local services for development. Postgres runs natively (PostgreSQL 18, port 5432).
+#   docker compose up -d
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sales-pipeline-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+
+volumes:
+  redis-data:

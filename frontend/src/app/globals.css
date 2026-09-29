@@ -1,0 +1,99 @@
+@import "tailwindcss";
+@import "../modules/sales-pipeline/styles/tokens.css";
+@import "../modules/sales-pipeline/styles/pipeline.css";
+
+/* Pipeline breakpoints: phone < 700 (bottom tab bar), tab 700–1100 (icon rail), desk > 1100 (full sidebar) */
+@theme {
+  --breakpoint-tab: 700px;
+  --breakpoint-desk: 1101px;
+}
+
+@theme inline {
+  --font-sans: var(--font-onest), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --color-canvas: var(--bg);
+  --color-panel: var(--panel);
+  --color-hover: var(--hover);
+  --color-sunk: var(--sunk);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-brand: var(--brand);
+  --color-brand-press: var(--brand-press);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-text: var(--brand-text);
+  --color-brand-border: var(--brand-border);
+  --color-find: var(--find);
+  --color-find-soft: var(--find-soft);
+  --color-engage: var(--engage);
+  --color-engage-soft: var(--engage-soft);
+  --color-win: var(--win);
+  --color-win-soft: var(--win-soft);
+  --color-launch: var(--launch);
+  --color-launch-soft: var(--launch-soft);
+  --color-lanes: var(--lanes);
+  --color-lanes-soft: var(--lanes-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-border: var(--warn-border);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-sample: var(--sample);
+  --color-sample-soft: var(--sample-soft);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+
+  --shadow-sh1: var(--sh1);
+  --shadow-sh2: var(--sh2);
+  --shadow-sh3: var(--sh3);
+}
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; border-color: var(--line); }
+  html { background: var(--bg); }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  button:not(:disabled), [role="button"] { cursor: pointer; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

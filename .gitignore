@@ -1,0 +1,9 @@
+# Repo-wide safety net: real env files never go in git (each app has its own .gitignore too)
+.env
+.env.*
+!.env.example
+**/.venv/
+**/node_modules/
+
+# Local planning notes
+LEFT_WORK.md

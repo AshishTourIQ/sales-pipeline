@@ -1,0 +1,48 @@
+/* Shapes that utilities can't express cleanly: chevron stage headers, stepper, timeline. */
+
+/* Phase color variables: set --pc (strong) and --ps (soft) via the .ph-* classes */
+.ph-find { --pc: var(--find); --ps: var(--find-soft); }
+.ph-engage { --pc: var(--engage); --ps: var(--engage-soft); }
+.ph-win { --pc: var(--win); --ps: var(--win-soft); }
+.ph-launch { --pc: var(--launch); --ps: var(--launch-soft); }
+.ph-lanes { --pc: var(--lanes); --ps: var(--lanes-soft); }
+
+/* Board column header */
+.sp-chev {
+  position: relative; height: 54px; padding: 8px 24px 8px 22px; background: var(--ps);
+  clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 50%, calc(100% - 13px) 100%, 0 100%, 13px 50%);
+  margin-bottom: 8px; display: flex; flex-direction: column; justify-content: center; flex: none;
+}
+.sp-chev.first { clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 50%, calc(100% - 13px) 100%, 0 100%); padding-left: 14px; border-radius: 10px 0 0 10px; }
+.sp-chev.lane { clip-path: none; border-radius: 10px; padding: 8px 14px; }
+.sp-chev.opt { background: repeating-linear-gradient(135deg, var(--ps), var(--ps) 9px, #FFFFFF 9px, #FFFFFF 12px); }
+
+/* Drawer stepper */
+.sp-step {
+  flex: 1; height: 26px; border: 0; padding: 0; background: var(--sunk);
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 50%, calc(100% - 7px) 100%, 0 100%, 7px 50%);
+  font-size: 11px; font-weight: 600; color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
+.sp-step:first-child { clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 50%, calc(100% - 7px) 100%, 0 100%); border-radius: 6px 0 0 6px; }
+.sp-step:last-child { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 7px 50%); border-radius: 0 6px 6px 0; }
+.sp-step:not(:disabled):hover { filter: brightness(.95); }
+.sp-step.done { background: var(--ps); color: var(--pc); }
+.sp-step.cur { background: var(--pc); color: #FFFFFF; }
+.sp-step:disabled { cursor: default; }
+@media (max-width: 699px) { .sp-step { font-size: 0; } }
+
+/* Timeline */
+.sp-tl { list-style: none; margin: 0; padding: 0; }
+.sp-tl li { position: relative; padding: 0 0 16px 20px; }
+.sp-tl li::before { content: ""; position: absolute; left: 4px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); }
+.sp-tl li.move::before { background: var(--brand); }
+.sp-tl li.ai::before { background: var(--engage); }
+.sp-tl li::after { content: ""; position: absolute; left: 8px; top: 18px; bottom: 2px; border-left: 1px solid var(--line); }
+.sp-tl li:last-child::after { display: none; }
+
+/* Hide scrollbars on horizontal tab rows */
+.sp-noscroll { scrollbar-width: none; }
+.sp-noscroll::-webkit-scrollbar { display: none; }
+
+/* Safe areas for the phone tab bar */
+.sp-safe-b { padding-bottom: env(safe-area-inset-bottom, 0px); }

@@ -1,0 +1,28 @@
+# Secrets: real env files never go in git
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Django
+/staticfiles/
+/media/
+*.sqlite3
+
+# Celery
+celerybeat-schedule*
+celerybeat.pid
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

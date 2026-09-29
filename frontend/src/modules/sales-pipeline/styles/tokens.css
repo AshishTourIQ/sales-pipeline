@@ -1,0 +1,73 @@
+/*
+ * Sales pipeline design tokens (from the TourIQ pipeline design artifact).
+ * When this module moves into the host app, point these at the host's own
+ * tokens instead of the literal values; component code only uses the names.
+ */
+:root {
+  --bg: #F5F6F8;
+  --panel: #FFFFFF;
+  --hover: #F2F3F6;
+  --sunk: #EEF0F3;
+  --ink: #1A1C21;
+  --ink-2: #5A606C;
+  --ink-3: #8B919C;
+  --line: #E5E7EB;
+  --line-2: #D2D6DC;
+  --brand: #F15A24;
+  --brand-press: #D84A16;
+  --brand-soft: #FFF0E8;
+  --brand-text: #C03E0B;
+  --brand-border: #FFD9C7;
+
+  /* Phase colors */
+  --find: #4F6BED;
+  --find-soft: #ECF0FE;
+  --engage: #7C5CF0;
+  --engage-soft: #F1EDFE;
+  --win: #F15A24;
+  --win-soft: #FFEFE7;
+  --launch: #1E9E62;
+  --launch-soft: #E4F5EC;
+  --lanes: #7D8491;
+  --lanes-soft: #ECEEF1;
+
+  /* Status */
+  --danger: #D2352B;
+  --danger-soft: #FDECEA;
+  --warn: #B06800;
+  --warn-soft: #FFF3DE;
+  --warn-border: #F7DDAF;
+  --ok: #1E9E62;
+  --ok-soft: #E4F5EC;
+  --info: #2F6BE0;
+  --info-soft: #EAF1FD;
+  --sample: #5B3FD1;
+  --sample-soft: #F3F0FF;
+
+  --sh1: 0 1px 2px rgba(20, 24, 31, .06), 0 1px 1px rgba(20, 24, 31, .03);
+  --sh2: 0 6px 18px rgba(20, 24, 31, .09);
+  --sh3: 0 24px 64px rgba(20, 24, 31, .22);
+
+  /* shadcn/ui semantic tokens, mapped onto the pipeline palette */
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card: var(--panel);
+  --card-foreground: var(--ink);
+  --popover: var(--panel);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #FFFFFF;
+  --secondary: var(--sunk);
+  --secondary-foreground: var(--ink);
+  --muted: var(--sunk);
+  --muted-foreground: var(--ink-2);
+  --accent: var(--hover);
+  --accent-foreground: var(--ink);
+  --destructive: var(--danger);
+  --border: var(--line);
+  --input: var(--line-2);
+  --ring: var(--brand);
+  --radius: 8px;
+
+  color-scheme: light;
+}

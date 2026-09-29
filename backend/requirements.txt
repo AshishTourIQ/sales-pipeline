@@ -1,0 +1,18 @@
+# Direct dependencies. Exact resolved versions: requirements.lock.txt
+Django>=5.2.8,<6
+djangorestframework>=3.16
+djangorestframework-simplejwt>=5.5
+psycopg[binary]>=3.2
+django-environ>=0.12
+django-cors-headers>=4.6
+django-filter>=24
+celery[redis]>=5.5
+django-celery-beat>=2.8
+resend>=2
+anthropic>=0.40
+pydantic>=2.9
+boto3>=1.35
+
+# dev / test
+pytest>=8
+pytest-django>=4.9
