@@ -1,5 +1,5 @@
-import { ORDER, ROUTES, SOURCES, TEMPLATE, type Route } from "../config/template";
-import type { Company, Deal, Flag, Pipeline, Stage, StageConfig, StageKey, Task } from "../types";
+import { ALL_TEMPLATE_STAGES, ORDER, PIPELINE_TEMPLATES, ROUTES, SOURCES, TEMPLATE, type Route } from "../config/template";
+import type { Company, Deal, Flag, Pipeline, PipelineTemplate, Stage, StageConfig, StageKey, Task } from "../types";
 import { daysSince, today } from "./dates";
 
 /*
@@ -10,14 +10,15 @@ import { daysSince, today } from "./dates";
 
 const LANES: StageKey[] = ["nurture", "lost"];
 const templateEntry = (key: StageKey): StageConfig => {
-  const t = TEMPLATE.find((x) => x.key === key);
+  const t = ALL_TEMPLATE_STAGES.find((x) => x.key === key);
   return t
     ? { key, name: t.name, phase: t.phase, limit: t.limit, ownerId: t.ownerId, ...(t.optional ? { optional: true } : {}), ...(t.lane ? { lane: true } : {}) }
     : { key, name: key, phase: "win", limit: null, ownerId: "" };
 };
 
-/** The TourIQ template as a stage list (new pipelines start from it). */
-export const defaultStageList = (): StageConfig[] => TEMPLATE.map((t) => templateEntry(t.key));
+/** A template as a stage list (new pipelines start from it). */
+export const defaultStageList = (template: PipelineTemplate = "touriq"): StageConfig[] =>
+  (PIPELINE_TEMPLATES[template] ?? PIPELINE_TEMPLATES.touriq).stages.map((t) => templateEntry(t.key));
 
 /** Stored list, tolerating the old {key: overrides} map and always ending with both lanes. */
 export function rawStages(p: Pipeline | null | undefined): StageConfig[] {
@@ -38,7 +39,7 @@ export function stagesOf(p: Pipeline | null | undefined): Stage[] {
   let n = 0;
   const out: Stage[] = [];
   for (const s of rawStages(p)) {
-    const base = TEMPLATE.find((t) => t.key === s.key);
+    const base = ALL_TEMPLATE_STAGES.find((t) => t.key === s.key);
     const lane = LANES.includes(s.key);
     const optional = !!(s.optional ?? base?.optional);
     if (s.key === "pilot" && p?.pilotEnabled === false) continue;
@@ -58,7 +59,7 @@ export function stagesOf(p: Pipeline | null | undefined): Stage[] {
 export function stageDef(p: Pipeline | null | undefined, key: StageKey): Stage {
   const found = stagesOf(p).find((s) => s.key === key);
   if (found) return found;
-  const t = TEMPLATE.find((s) => s.key === key);
+  const t = ALL_TEMPLATE_STAGES.find((s) => s.key === key);
   return { ...templateEntry(key), phase: t?.phase ?? "lanes", ownerId: "", num: null, lane: !!t?.lane, optional: false, custom: !t };
 }
 
@@ -89,7 +90,8 @@ export function nextStageOf(p: Pipeline | null | undefined, key: StageKey): Stag
 export function resolveStage(p: Pipeline | null | undefined, key: StageKey): StageKey {
   const all = stagesOf(p).map((s) => s.key);
   if (all.includes(key)) return key;
-  const route = mainKeys(p);
+  // Optional stages (Pilot, Offer sent) are only entered by choice, never as a stand-in
+  const route = stagesOf(p).filter((s) => !s.lane && !s.optional).map((s) => s.key);
   const i = ORDER.indexOf(key);
   if (i >= 0) {
     const later = ORDER.slice(i + 1).find((k) => route.includes(k));
@@ -112,6 +114,11 @@ export function reachedOrPast(p: Pipeline | null | undefined, d: Deal, milestone
 export function routesFor(p: Pipeline | null | undefined, key: StageKey): Route[] {
   const all = new Set(stagesOf(p).map((s) => s.key));
   const out: Route[] = [];
+  // Partnerships / Referrals pipelines: Nurture comes back to their own first stage
+  if (key === "nurture" && p && p.template !== "touriq") {
+    const first = stagesOf(p).find((s) => !s.lane && !s.optional);
+    return first ? [["Re-engage", first.key]] : [];
+  }
   for (const [label, to] of ROUTES[key] ?? []) {
     const target = all.has(to) ? to : resolveStage(p, to);
     if (target !== key && all.has(target) && !out.some((r) => r[1] === target)) out.push([label, target]);
@@ -199,5 +206,5 @@ export function avColor(name: string): string {
 export const newId = (): string => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 export const EMPTY_COMPANY: Company = {
-  name: "", website: "", region: "", segment: "", platform: "", products5: false, sellsOut: false, reachable: false,
+  name: "", website: "", region: "", segment: "", platform: "", products5: false, sellsOut: false, reachable: false, category: "",
 };

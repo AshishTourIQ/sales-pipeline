@@ -1,7 +1,7 @@
 """Pipelines, per-pipeline stage settings, tenant settings and the sales team."""
 from django.contrib.auth import get_user_model
 
-from ..config import DEFAULT_RULES, DEFAULT_TARGETS, STAGES
+from ..config import DEFAULT_RULES, DEFAULT_TARGETS, LINK_KEYS, STAGES, TEMPLATES
 from ..models import Pipeline, PipelineSettings
 from . import stages
 from .errors import ServiceError
@@ -28,9 +28,12 @@ def team_users(tenant_id):
     return User.objects.filter(tenant_id=tenant_id, is_sales_team=True, is_active=True).order_by("full_name", "username")
 
 
-def create_pipeline(tenant_id, name: str) -> Pipeline:
+def create_pipeline(tenant_id, name: str, template: str = "touriq") -> Pipeline:
+    if template not in TEMPLATES:
+        raise ServiceError("Unknown pipeline template.", code="invalid_template")
     owners = {u.username: str(u.id) for u in team_users(tenant_id)}
-    return Pipeline.objects.create(tenant_id=tenant_id, name=name.strip() or "Pipeline", stages=stages.default_list(owners))
+    return Pipeline.objects.create(tenant_id=tenant_id, name=name.strip() or "Pipeline", template=template,
+                                   pilot_enabled=template == "touriq", stages=stages.default_list(owners, template))
 
 
 def valid_owner_ids(tenant_id) -> set[str]:
@@ -66,6 +69,29 @@ def update_settings(tenant_id, data: dict) -> PipelineSettings:
             raise ServiceError("Targets must be whole numbers.", code="invalid_targets")
     if "team" in data:
         set_team(tenant_id, data["team"] or [])
+    if "links" in data:
+        links = {**(s.links or {})}
+        for k, v in (data["links"] or {}).items():
+            if k not in LINK_KEYS:
+                continue
+            url = str(v or "").strip()[:600]
+            if url and not url.lower().startswith(("http://", "https://")):
+                url = f"https://{url}"
+            links[k] = url
+        s.links = links
+    if "event_costs" in data:
+        costs = {**(s.event_costs or {})}
+        for name, amount in (data["event_costs"] or {}).items():
+            name = str(name).strip()[:120]
+            if not name:
+                continue
+            if amount is None:
+                costs.pop(name, None)
+            else:
+                costs[name] = float(amount)
+        if len(costs) > 100:
+            raise ServiceError("Up to 100 events can have a cost.", code="too_many_events")
+        s.event_costs = costs
     s.save()
     return s
 

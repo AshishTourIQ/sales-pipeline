@@ -1,15 +1,18 @@
 """
-Internal email (alerts, digests) through Resend.
+Email to the team (alerts, digests, invites) through SMTP (EMAIL_* in .env), the same
+account as the emails to leads (client_mail.py), sent as STAFF_EMAIL_FROM_NAME.
 
-Without RESEND_API_KEY, emails are logged and kept in OUTBOX instead of sent,
-so local dev and tests never send real mail. Cold outreach never goes through
-here (it uses separate warmed domains; see the design doc).
+Without EMAIL_HOST / EMAIL_HOST_USER, emails are logged and kept in OUTBOX instead of
+sent, so local dev and tests never send real mail.
 """
 import logging
 from dataclasses import dataclass
 from html import escape
 
 from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
+
+from . import mail_guard
 
 log = logging.getLogger(__name__)
 
@@ -22,30 +25,34 @@ class Email:
     text: str
 
 
-# Captured emails when Resend isn't configured (dev/tests)
+# Captured emails when email isn't configured (dev/tests)
 OUTBOX: list[Email] = []
 
 
 def send_email(to: list[str], subject: str, html: str, text: str) -> bool:
-    """Returns True if handed to Resend, False if only logged (not configured, or the send failed)."""
+    """Returns True if the mail server took it, False if only logged (not configured, or the send failed)."""
     to = sorted({t for t in to if t})
     if not to:
         return False
     email = Email(to, subject, html, text)
-    if not settings.RESEND_API_KEY or not settings.EMAIL_FROM:
+    if not settings.EMAIL_ENABLED:
         OUTBOX.append(email)
-        log.info("Email (not sent, Resend not configured) to=%s subject=%s", to, subject)
+        log.info("Email (not sent, EMAIL_HOST not configured) to=%s subject=%s", to, subject)
         return False
-    import resend
-
-    resend.api_key = settings.RESEND_API_KEY
+    out = mail_guard.prepare(to, subject, html, text)
+    if not out.to:
+        return False
+    to, subject, html, text = out.to, out.subject, out.html, out.text
+    msg = EmailMultiAlternatives(subject=subject, body=text, to=to,
+                                 from_email=f"{settings.STAFF_EMAIL_FROM_NAME} <{settings.EMAIL_HOST_USER}>")
+    msg.attach_alternative(html, "text/html")
     try:
-        resend.Emails.send({"from": settings.EMAIL_FROM, "to": to, "subject": subject, "html": html, "text": text})
+        msg.send(fail_silently=False)
         return True
     except Exception:
         # Never let an email failure break a job: raising would roll back the run's
         # DealAlert claims and re-send every other recipient's alert next run.
-        log.exception("Resend send failed to=%s subject=%s", to, subject)
+        log.exception("Email send failed to=%s subject=%s", to, subject)
         return False
 
 

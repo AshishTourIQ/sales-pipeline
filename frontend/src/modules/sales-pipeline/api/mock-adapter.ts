@@ -3,18 +3,23 @@
  * and runs the same automation the Django backend will run. Use it for UI work
  * and demos; switch to createDrfApi() when the backend is up.
  */
-import { BOOTH_SOURCES, CHECKLISTS, DEFAULT_SETTINGS } from "../config/template";
+import {
+  BOOTH_FOLLOWUP_DEFAULTS, BOOTH_SOURCES, CALL_TYPES, categoryFromText, isCompetitor, CATEGORY_TEMPLATE, CHECKLISTS, VISITOR_CATEGORY, DEFAULT_SETTINGS, isTrack, OFFERS, PARTNER_VISITORS, PLATFORM_FOR_BOOKING,
+  TIER_INTEREST, VISITOR_TYPES,
+} from "../config/template";
+import { boothEntry, defaultOffer, followupKey } from "../lib/booth";
+import { cleanAnswers, scoreBooth } from "../lib/scoring";
 import { addDays, DAY, dayDiff, nowIso, today } from "../lib/dates";
 import {
   defaultStageList, EMPTY_COMPANY, entryForSourceIn, fitScore, mainKeys, newId, nextStageOf, rawStages, resolveStage,
-  stageDef, stageIndex, stagesOf,
+  stageDef, stageIndex, stageLabel, stagesOf,
 } from "../lib/pipeline";
 import { ruleTasks, type RuleExtra } from "../lib/rules";
 import { describe, gated, requirements } from "../lib/gating";
 import type {
-  Activity, ActivityType, AiDraftInput, AiDraftResult, CreateDealInput, CreateTaskInput, CurrentUser, Deal,
+  Activity, ActivityType, AiDraftInput, AiDraftResult, BoothInfo, CreateBoothLeadInput, CreateDealInput, CreateTaskInput, PipelineTemplate, Touchpoint, TouchpointKind, CurrentUser, Deal,
   DealMutationResult, DealPatch, HistoryEntry, ImportResult, ImportRow, MoveDealInput, Pipeline,
-  PipelineSettings, StageKey, StageTaskTemplate, Task, TaskPatch,
+  PipelineSettings, StageKey, StageTaskTemplate, Task, TaskPatch, DuplicateMatch,
 } from "../types";
 import { ApiError, type PipelineApi } from "./types";
 
@@ -24,6 +29,8 @@ interface MockDb {
   tasks: Record<string, Task>;
   settings: PipelineSettings;
   stageTasks?: Record<string, StageTaskTemplate>;
+  /** Data version: 2 = pipelines have the "Offer sent" stage */
+  v?: number;
 }
 
 export interface MockApiOptions {
@@ -35,8 +42,8 @@ export interface MockApiOptions {
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-function templatePipeline(id: string, name: string): Pipeline {
-  return { id, name, template: "touriq", pilotEnabled: true, stages: defaultStageList(), createdAt: nowIso() };
+function templatePipeline(id: string, name: string, template: PipelineTemplate = "touriq"): Pipeline {
+  return { id, name, template, pilotEnabled: template === "touriq", stages: defaultStageList(template), createdAt: nowIso() };
 }
 
 export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
@@ -64,6 +71,17 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
     } catch { /* storage unavailable */ }
     const base: MockDb = saved ?? { pipelines: {}, deals: {}, tasks: {}, settings: clone(DEFAULT_SETTINGS) };
     if (!Object.keys(base.pipelines).length) base.pipelines.touriq = templatePipeline("touriq", "TourIQ");
+    if ((base.v ?? 1) < 2) {
+      Object.values(base.pipelines).forEach((p) => {
+        const list = rawStages(p);
+        if (list.some((s) => s.key === "offer")) return;
+        const offer = defaultStageList().find((s) => s.key === "offer");
+        const i = list.findIndex((s) => s.key === "s5");
+        if (offer) list.splice(i >= 0 ? i + 1 : list.findIndex((s) => s.key === "s6"), 0, offer);
+        p.stages = list;
+      });
+      base.v = 2;
+    }
     return base;
   }
   function save() {
@@ -136,15 +154,24 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
       id: newId(), company: { ...EMPTY_COMPANY }, contact: { name: "", title: "", email: "", phone: "", linkedin: "", decisionMaker: false },
       source: "", interest: "", ownerId: "", fit: 0, stageChangedAt: nowIso(), createdAt: nowIso(), history: [], activities: [],
       snapshotSent: false, demoDate: "", payment: { status: "Not invoiced" }, value: "", package: "", locations: "",
-      lossReason: "", lossCompetitor: "", nurtureReason: "", reengageDate: "", qual: {}, pilotChecks: {}, onboarding: {}, ...p,
+      lossReason: "", lossCompetitor: "", nurtureReason: "", reengageDate: "", qual: {}, pilotChecks: {}, onboarding: {},
+      metById: "", booth: null, track: "", touchpoints: [], callType: "", accountManagerId: "", links: [], commissionPct: null, commissionInPct: null,
+      meetingUrl: "", onCalendar: false, event: "", ...p,
     };
+  }
+
+  /** Add a journey step; once = skip when the deal already has one of that kind. */
+  function addStep(deal: Deal, kind: TouchpointKind, source: Touchpoint["source"], extra: Partial<Touchpoint> = {}, once = false) {
+    const list = deal.touchpoints ?? [];
+    if (once && list.some((t) => t.kind === kind)) return;
+    deal.touchpoints = [...list, { id: newId(), kind, source, at: nowIso(), score: "", link: "", detail: "", byName: actor()?.name ?? "", ...extra }];
   }
 
   function createDealSync(input: CreateDealInput): DealMutationResult {
     const entry = input.entryStage;
     const deal = newDeal({
       pipelineId: input.pipelineId, stage: entry, company: input.company, contact: input.contact, source: input.source,
-      interest: input.interest, ownerId: input.ownerId, fit: fitScore(input.company), history: [hist(null, entry)],
+      interest: input.interest, ownerId: input.ownerId, fit: fitScore(input.company), history: [hist(null, entry)], event: input.event?.trim() ?? "",
       activities: input.note ? [act("note", input.note)] : [], demoDate: input.demoDate ?? "",
     });
     db.deals[deal.id] = deal;
@@ -158,12 +185,122 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
     return { deal, tasksCreated: created, tasksClosed: [] };
   }
 
+  /** Mirror of backend services/booth.py create_booth_lead. */
+  function createBoothSync(input: CreateBoothLeadInput): DealMutationResult {
+    const existing = input.clientId ? Object.values(db.deals).find((d) => d.booth?.clientId === input.clientId) : undefined;
+    if (existing) return { deal: existing, tasksCreated: [], tasksClosed: [] };
+    const name = input.company.trim();
+    if (!name) throw new ApiError("Add the company name to save.", 400, "company_required");
+    const p = pipelineOf(input.pipelineId);
+    if (!p) throw new ApiError("Pipeline not found", 404, "not_found");
+    const v = input.visitor;
+    const answers = v === "operator" ? cleanAnswers(input.answers) : {};
+    const sc = scoreBooth(v, answers);
+    const offer = (v === "operator" && input.offer) || defaultOffer(v, sc.tier, input.gamePlayed);
+    const partner = PARTNER_VISITORS.includes(v);
+    const entry = boothEntry(p, v, offer, input.source);
+    const lane = entry === "lost" || entry === "nurture" ? entry : null;
+    const role = answers.role ?? "";
+    const ownerId = input.followupOwnerId || stageDef(p, entry).ownerId;
+    const company = {
+      ...EMPTY_COMPANY, name, region: input.destination.trim(), platform: PLATFORM_FOR_BOOKING[answers.booking ?? ""] ?? "",
+      sellsOut: answers.sellouts === "often", reachable: role === "decider", category: VISITOR_CATEGORY[v],
+    };
+    const metAt = input.metAt || nowIso().slice(0, 16);
+    const booth: BoothInfo = {
+      clientId: input.clientId, visitor: v, answers, offer, gamePlayed: input.gamePlayed, gameScore: input.gameScore.trim(), metAt,
+      destination: input.destination.trim(), runs: input.runs.trim(), pricingTool: input.pricingTool.trim(), ...sc,
+    };
+    const metName = db.settings.team.find((m) => m.id === input.metById)?.name ?? actor()?.name ?? "";
+    const summary = [
+      `Booth lead (${input.source || "booth"})${metName ? `, met by ${metName}` : ""} on ${metAt.replace("T", " ")}.`,
+      `Visitor: ${VISITOR_TYPES.find((x) => x[0] === v)?.[1] ?? v}.`,
+      sc.tier ? `Tier ${sc.tier} (${sc.points} points${sc.capped ? `, capped from ${sc.tierBeforeCap}` : ""}${sc.complete ? "" : ", some questions unanswered"}).` : "",
+      offer ? `Offer: ${OFFERS.find((o) => o[0] === offer)?.[1]}.` : "",
+      input.gamePlayed ? `Played the game${input.gameScore ? `, score ${input.gameScore}` : ""}.` : "",
+      input.destination ? `Destination: ${input.destination}.` : "", input.runs ? `Runs: ${input.runs}.` : "", input.pricingTool ? `Pricing tool: ${input.pricingTool}.` : "",
+    ].filter(Boolean).join(" ");
+    const deal = newDeal({
+      pipelineId: p.id, stage: entry, company, source: input.source || "Arival booth", event: input.event?.trim() ?? "", ownerId, fit: fitScore(company),
+      contact: { name: input.contact.name.trim(), email: input.contact.email.trim(), phone: input.contact.phone.trim(), title: { decider: "Owner / GM", manager: "Manager", staff: "Staff" }[role] ?? "", linkedin: "", decisionMaker: role === "decider" },
+      interest: v === "operator" && sc.tier ? TIER_INTEREST[sc.tier] : "", history: [hist(null, entry)],
+      activities: [act("meeting", summary), ...(input.note.trim() ? [act("note", input.note.trim())] : [])],
+      demoDate: offer === "demo_booked" ? input.bookedAt : "", metById: input.metById || actor()?.id || "", booth,
+      locations: { "3_plus": "3+", "2": "2", "1": "1" }[answers.locations ?? ""] ?? "",
+      lossReason: lane === "lost" ? "Not a prospect" : "", nurtureReason: lane === "nurture" ? (v === "press" ? "Press hand-off" : "Partner hand-off") : "",
+      reengageDate: lane === "nurture" ? addDays(60) : "",
+    });
+    db.deals[deal.id] = deal;
+    const key = followupKey(v, sc.tier);
+    const days = key ? (db.settings.boothFollowup ?? BOOTH_FOLLOWUP_DEFAULTS)[key]?.days ?? 2 : 0;
+    if (entry === "offer" && isTrack(offer)) deal.track = offer;
+    const { created } = applyRules(deal, entry, {
+      demoDate: deal.demoDate, booth: true, lossReason: deal.lossReason, reengageDate: deal.reengageDate,
+      offer: deal.track, offerDue: input.followupDue || addDays(days), gamePlayed: offer === "game" ? input.gamePlayed : undefined,
+    }, ownerId);
+    if (input.gamePlayed) addStep(deal, "game_played", "booth", { score: input.gameScore.trim() });
+    const notices: string[] = [];
+    if (offer === "analysis") {
+      const web = (input.website ?? "").trim();
+      deal.booth = { ...booth, analysis: { website: web, status: "requested" } };
+      if (web && !deal.company.website) deal.company.website = web;
+      addStep(deal, "analysis_requested", "booth", { link: web, detail: web });
+      deal.activities.push(act("note", `Draft email (not sent yet: goes out with the report once the analysis tool is connected)\n\nSubject: Your comparative analysis: ${name}\n\nView the report: [report link]`));
+      notices.push("Comparative analysis requested. The report email is drafted on the deal.");
+    }
+    if (offer === "game" && !input.gamePlayed) notices.push("Mock mode: the game link email is only sent by the server.");
+    if (offer === "demo_booked") addStep(deal, "demo_booked", "booth", { detail: deal.demoDate.replace("T", " ") });
+    else if (offer === "demo_given") addStep(deal, "demo_held", "booth", { detail: "Demo given at the booth" });
+    if (key && input.followupOwnerId && entry !== "offer") {
+      const who = deal.contact.name || name;
+      const tag = `booth, tier ${sc.tier}`;
+      const title = partner ? `Hand ${who} to the partnerships team` : v === "press" ? `Follow up with ${who} (press / Arival)` : ({
+        demo_booked: `Send the demo invite and deck to ${who} (${tag})`, audit: `Send the audit form to ${who} (${tag})`,
+        analysis: `Run the comparative analysis and send it to ${who} (${tag})`, game: `Send ${who} their game result and the demo link (${tag})`,
+      } as Record<string, string>)[offer] ?? `Follow up with ${who} (${tag})`;
+      const t = makeTask({ dealId: deal.id, pipelineId: p.id, title, ownerId: input.followupOwnerId, due: input.followupDue || addDays(days), auto: true, rule: "r_capture48", stage: entry });
+      db.tasks[t.id] = t;
+      created.push(t);
+    }
+    return { deal, tasksCreated: created, tasksClosed: [], notices };
+  }
+
+  /** Mirror of backend deals.mark_competitor: never contacted. */
+  function markCompetitor(d: Deal) {
+    Object.values(db.tasks).forEach((t) => { if (t.dealId === d.id && !t.done) Object.assign(t, { done: true, autoClosed: true, doneAt: nowIso() }); });
+    if (d.stage !== "lost") moveSync(d, { to: "lost", lossReason: "Not a prospect" }, "Competitor: do not contact", true);
+  }
+
+  /** Mirror of backend deals.transfer_deal. */
+  function transferSync(deal: Deal, target: Pipeline): DealMutationResult {
+    if (isCompetitor(deal)) throw new ApiError("This company is a competitor: do not contact.", 409, "competitor");
+    if (deal.pipelineId === target.id) throw new ApiError("The deal is already in that pipeline.", 400, "same_pipeline");
+    const to = stagesOf(target).find((s) => !s.lane && !s.optional)?.key;
+    if (!to) throw new ApiError("Choose a stage in that pipeline.", 400, "invalid_stage");
+    const fromName = pipelineOf(deal.pipelineId)?.name ?? "another";
+    const closed: string[] = [];
+    Object.values(db.tasks).forEach((t) => {
+      if (t.dealId !== deal.id) return;
+      if (!t.done && t.auto) { Object.assign(t, { done: true, autoClosed: true, doneAt: nowIso() }); closed.push(t.id); }
+      t.pipelineId = target.id;
+    });
+    const sd = stageDef(target, to);
+    const ownerId = ruleOn("r_owner") && sd.ownerId ? sd.ownerId : deal.ownerId;
+    const h = hist(deal.stage, to);
+    h.byName = h.byName ? `${h.byName} (moved from ${fromName})` : `Moved from ${fromName}`;
+    Object.assign(deal, { pipelineId: target.id, stage: to, stageChangedAt: nowIso(), ownerId, track: "", callType: "", history: [...deal.history, h] });
+    deal.activities = capActs([...deal.activities, act("note", `Moved from the ${fromName} pipeline to ${target.name}.`)]);
+    const { created } = applyRules(deal, to, {}, ownerId);
+    return { deal, tasksCreated: created, tasksClosed: closed };
+  }
+
   function moveSync(deal: Deal, input: MoveDealInput, byLabel?: string, system = false): DealMutationResult {
     const to = input.to;
     if (deal.stage === to) return { deal, tasksCreated: [], tasksClosed: [] };
     const p = pipelineOf(deal.pipelineId);
     if (!stagesOf(p).some((s) => s.key === to)) throw new ApiError("That stage isn't used in this pipeline.", 400, "invalid_stage");
     if (to === "lost" && !input.lossReason) throw new ApiError("A loss reason is required", 400, "loss_reason_required");
+    if (to !== "lost" && to !== "nurture" && isCompetitor(deal)) throw new ApiError("This company is a competitor: do not contact. It stays in Lost.", 409, "competitor");
     const from = deal.stage;
     let overrideNote = "";
     if (!system && gated(p, from, to)) {
@@ -189,9 +326,16 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
       if (!deal.signedAt) deal.signedAt = today();
     }
     if (to === "s13" && !deal.liveAt) deal.liveAt = today();
+    if (to === "offer" && input.track) deal.track = input.track;
+    if (to === "s9" && input.callType) deal.callType = input.callType;
+    if (to === "s6") addStep(deal, "demo_booked", "pipeline", { detail: deal.demoDate.replace("T", " ") }, true);
+    if (to === "s7") addStep(deal, "demo_held", "pipeline", {}, true);
     if (overrideNote) deal.activities = capActs([...deal.activities, act("note", overrideNote)]);
     if (input.note) deal.activities = capActs([...deal.activities, act("note", input.note)]);
-    const { created, closed } = applyRules(deal, to, { demoDate: input.demoDate, reengageDate: input.reengageDate, lossReason: input.lossReason }, ownerId);
+    const { created, closed } = applyRules(deal, to, {
+      demoDate: input.demoDate, reengageDate: input.reengageDate, lossReason: input.lossReason, offer: to === "offer" ? deal.track : "",
+      callType: to === "s9" ? deal.callType : "",
+    }, ownerId);
     return { deal, tasksCreated: created, tasksClosed: closed };
   }
 
@@ -208,10 +352,19 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
 
   const api: PipelineApi = {
     listPipelines: () => run(() => Object.values(db.pipelines).map((p) => ({ ...p, dealCount: Object.values(db.deals).filter((d) => d.pipelineId === p.id).length }))),
-    createPipeline: (name) => run(() => {
+    importHandoffs: (pipelineId) => run(() => {
+      const target = pipelineOf(pipelineId);
+      if (!target) throw new ApiError("Pipeline not found", 404, "not_found");
+      const cats = Object.entries(CATEGORY_TEMPLATE).filter(([, t]) => t === target.template).map(([c]) => c);
+      if (!cats.length) throw new ApiError("Only a Partnerships or Referrals pipeline takes partner hand-offs.", 400, "invalid_template");
+      const list = Object.values(db.deals).filter((d) => d.pipelineId !== pipelineId && d.stage === "nurture" && d.nurtureReason === "Partner hand-off" && cats.includes(d.company.category ?? ""));
+      list.forEach((d) => transferSync(d, target));
+      return { moved: list.length };
+    }),
+    createPipeline: (name, template = "touriq") => run(() => {
       let id = name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || newId();
       if (db.pipelines[id]) id = `${id}-${newId().slice(-4)}`;
-      const p = templatePipeline(id, name);
+      const p = templatePipeline(id, name, template);
       db.pipelines[id] = p;
       return p;
     }),
@@ -272,10 +425,18 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
 
     listDeals: (pipelineId) => run(() => Object.values(db.deals).filter((d) => d.pipelineId === pipelineId)),
     createDeal: (input) => run(() => createDealSync(input)),
+    createBoothLead: (input) => run(() => createBoothSync(input)),
     updateDeal: (id, patch) => run(() => {
       const d = mustDeal(id);
-      Object.assign(d, patch);
+      const { booth: boothPatch, ...rest } = patch;
+      Object.assign(d, rest);
+      if (boothPatch) {
+        if (!d.booth) throw new ApiError("This deal wasn't captured with the booth form.", 400, "not_booth");
+        const b = { ...d.booth, ...boothPatch, answers: cleanAnswers(boothPatch.answers ?? d.booth.answers) };
+        d.booth = { ...b, ...scoreBooth(b.visitor, b.answers) };
+      }
       if (patch.company) d.fit = fitScore(d.company);
+      if (isCompetitor(d)) markCompetitor(d);
       if (patch.payment?.status === "Paid" && !d.payment.paidAt) d.payment.paidAt = today();
       const cl = CHECKLISTS[d.stage];
       const advanced = cl && patch[cl.field] ? maybeAdvance(d) : null;
@@ -286,10 +447,43 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
       delete db.deals[id];
       Object.values(db.tasks).forEach((t) => { if (t.dealId === id) delete db.tasks[t.id]; });
     }),
-    addActivity: (dealId, type, text) => run(() => {
+    addTouchpoint: (dealId, input) => run(() => {
       const d = mustDeal(dealId);
-      d.activities = capActs([...d.activities, act(type, text)]);
+      addStep(d, input.kind, "manual", { score: input.score ?? "", link: input.link ?? "", detail: input.detail ?? "" });
       return d;
+    }),
+    addActivity: (dealId, type, text, attendeeIds = []) => run(() => {
+      const d = mustDeal(dealId);
+      d.activities = capActs([...d.activities, { ...act(type, text), attendeeIds: type === "call" || type === "meeting" ? [...new Set(attendeeIds)] : [] }]);
+      return d;
+    }),
+    updateActivity: (activityId, patch) => run(() => {
+      const d = Object.values(db.deals).find((x) => x.activities.some((a) => a.id === activityId));
+      if (!d) throw new ApiError("Entry not found.", 404, "not_found");
+      d.activities = d.activities.map((a) => (a.id === activityId ? { ...a, attendeeIds: [...new Set(patch.attendeeIds)] } : a));
+      return d;
+    }),
+    setCallType: (dealId, callType) => run(() => {
+      const d = mustDeal(dealId);
+      if (d.stage !== "s9") throw new ApiError("The next call is set while the deal is in the second-call stage.", 400, "invalid_stage");
+      if (d.callType === callType) return { deal: d, tasksCreated: [], tasksClosed: [] };
+      const before = d.callType;
+      d.callType = callType;
+      const closed: string[] = [];
+      Object.values(db.tasks).forEach((t) => {
+        if (t.dealId === d.id && t.stage === "s9" && t.rule === "r_second" && !t.done) { Object.assign(t, { done: true, autoClosed: true, doneAt: nowIso() }); closed.push(t.id); }
+      });
+      const created = ruleTasks("s9", db.settings, { callType }).map((t) =>
+        makeTask({ dealId: d.id, pipelineId: d.pipelineId, title: t.title, ownerId: d.ownerId, due: t.due, auto: true, rule: t.rule, stage: "s9", blocking: t.blocking }));
+      created.forEach((t) => { db.tasks[t.id] = t; });
+      const name = (k: string) => CALL_TYPES.find((c) => c[0] === k)?.[1] ?? k;
+      d.activities = capActs([...d.activities, act("note", `Next call: ${name(callType)}${before ? ` (was ${name(before)}).` : "."}`)]);
+      return { deal: d, tasksCreated: created, tasksClosed: closed };
+    }),
+    transferDeal: (dealId, pipelineId) => run(() => {
+      const target = pipelineOf(pipelineId);
+      if (!target) throw new ApiError("Pipeline not found", 404, "not_found");
+      return transferSync(mustDeal(dealId), target);
     }),
     createExpansion: (dealId) => run(() => {
       const d = mustDeal(dealId);
@@ -342,9 +536,30 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
       return { tasksRemoved };
     }),
 
+    findDuplicates: ({ company = "", email = "", website = "" }) => run(() => {
+      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ")
+        .filter((w) => w && !["llc", "inc", "ltd", "limited", "co", "company", "the"].includes(w)).join(" ");
+      const host = (u: string) => u.toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/^www\./, "").split(/[/?#]/)[0];
+      const e = email.trim().toLowerCase(), n = norm(company), h = host(website.trim());
+      const out: DuplicateMatch[] = [];
+      for (const d of Object.values(db.deals)) {
+        if (d.sample) continue;
+        const match = e && d.contact.email.toLowerCase() === e ? "email"
+          : h && d.company.website && host(d.company.website) === h ? "website"
+            : n && norm(d.company.name) === n ? "company" : null;
+        if (!match) continue;
+        const p = db.pipelines[d.pipelineId];
+        out.push({ dealId: d.id, pipelineId: d.pipelineId, pipelineName: p?.name ?? "", company: d.company.name,
+          contactName: d.contact.name, stage: d.stage, stageName: p ? stageLabel(p, d.stage) : d.stage, ownerId: d.ownerId, match });
+      }
+      return out.slice(0, 5);
+    }),
     getSettings: () => run(() => db.settings),
     updateSettings: (patch) => run(() => {
-      db.settings = { ...db.settings, ...patch };
+      const eventCosts = patch.eventCosts
+        ? Object.fromEntries(Object.entries({ ...db.settings.eventCosts, ...patch.eventCosts }).filter(([, v]) => v != null))
+        : db.settings.eventCosts;
+      db.settings = { ...db.settings, ...patch, eventCosts };
       return db.settings;
     }),
 
@@ -375,8 +590,10 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
     for (const r of rows) {
       if (existing.has(r.company.toLowerCase())) { skipped++; continue; }
       existing.add(r.company.toLowerCase());
-      const stage = resolveStage(p, r.stage);
-      const company = { ...EMPTY_COMPANY, name: r.company, region: r.region, segment: r.segment, platform: r.platform, reachable: !!(r.email || r.linkedin) };
+      const category = categoryFromText(r.category ?? "");
+      const competitor = category === "competitor";
+      const stage = competitor ? "lost" : resolveStage(p, r.stage);
+      const company = { ...EMPTY_COMPANY, name: r.company, region: r.region, segment: r.segment, platform: r.platform, reachable: !!(r.email || r.linkedin), category };
       const at = r.last ? new Date(`${r.last}T12:00:00`).toISOString() : nowIso();
       const ownerId = db.settings.team.find((m) => m.name.toLowerCase() === r.owner.toLowerCase())?.id ?? stageDef(p, stage).ownerId;
       const fit = r.fit !== "" && !Number.isNaN(parseFloat(r.fit)) ? parseFloat(r.fit) : fitScore(company);
@@ -387,9 +604,10 @@ export function createMockApi(opts: MockApiOptions = {}): PipelineApi {
         activities: [...(r.notes ? [act("note", r.notes)] : []), act("note", "Imported from the Lead Tracker")],
         snapshotSent: r.snap, demoDate: r.demo ? `${r.demo}T09:00` : "",
         payment: { status: r.paid ? "Paid" : stageIndex(p, stage) >= stageIndex(p, resolveStage(p, "s11")) ? "Invoiced" : "Not invoiced" },
-        lossReason: stage === "lost" ? "Other" : "", reengageDate: stage === "nurture" ? r.nextDate || addDays(60) : "",
+        lossReason: stage === "lost" ? (competitor ? "Not a prospect" : "Other") : "", reengageDate: stage === "nurture" ? r.nextDate || addDays(60) : "",
       });
       db.deals[deal.id] = deal;
+      if (competitor) { deal.activities.push(act("note", "Competitor: do not contact.")); created++; continue; }
       if (r.next) { const t = makeTask({ dealId: deal.id, pipelineId, title: r.next, ownerId, due: r.nextDate, stage }); db.tasks[t.id] = t; }
       if (r.fu) { const t = makeTask({ dealId: deal.id, pipelineId, title: "Follow-up call or meeting", ownerId, due: r.fu, stage }); db.tasks[t.id] = t; }
       created++;
@@ -467,11 +685,20 @@ function mockDraft(d: Deal, input: AiDraftInput): AiDraftResult {
   const co = d.company.name || "the operator";
   const who = d.contact.name?.split(" ")[0] || "there";
   const note = "\n\n(Mock draft: connect the Django AI endpoint for real Claude output.)";
+  const partner = ["booking_platform", "ota", "revenue_manager", "agency"].includes(d.company.category ?? "");
+  if (partner && (input.action === "first" || input.action === "follow" || input.action === "brief")) {
+    const goal = d.company.category === "ota" ? "a channel so operators' dynamic prices reach your listings"
+      : d.company.category === "booking_platform" ? "an integration so any of your operators is one click from dynamic pricing, starting with one pilot client"
+        : "a referral partnership with a commission on every client";
+    return { text: `Subject: TourIQ and ${co}\n\nHi ${who},\n\nWe build dynamic pricing for tour operators. I'd like 20 minutes to talk about ${goal}.\n\nDoes a call work? [booking link]${note}` };
+  }
   switch (input.action) {
     case "brief":
       return { text: `What they sell\n${co}: ${d.company.segment || "segment unknown"} (guess).\n\nBooking platform\n${d.company.platform || "Unknown"}. Check before contacting.\n\nSuggested angle for the first message\nOffer a free Pricing Snapshot on one of their busiest tours.${note}` };
     case "first":
       return { text: `Subject: A free look at your pricing\n\nHi ${who},\n\nWe build dynamic pricing for tour operators. I'd like to run a free Pricing Snapshot on one of ${co}'s tours to show what the current prices may be leaving on the table. You keep control of every price.\n\nWorth a look? [booking link]\n\nReply 'no thanks' and I won't write again.${note}` };
+    case "invite":
+      return { text: `Subject: Your TourIQ demo\n\nHi ${who},\n\nLooking forward to showing you dynamic pricing on ${co}'s own tours on [date and time]. If your revenue or operations lead can join, even better. Here's the deck to look at before: [demo deck]\n\nNeed another time? [booking link]${note}` };
     case "follow":
       return { text: `Subject: Quick follow-up\n\nHi ${who}, following up on the Pricing Snapshot for ${co}. Here's the calendar link again: [booking link]${note}` };
     case "tag": {

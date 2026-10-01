@@ -8,13 +8,15 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, useCreateDeal } from "../../api/hooks";
-import { INTERESTS, PLATFORMS, ROLE_SUGGESTIONS, SEGMENTS, SOURCE_NAMES } from "../../config/template";
+import { BOOTH_SOURCES, INTERESTS, PLATFORMS, ROLE_SUGGESTIONS, SEGMENTS, SOURCE_NAMES } from "../../config/template";
 import { entryForSourceIn, resolveStage } from "../../lib/pipeline";
 import { useData } from "../../context/data-context";
 import { useUi } from "../../context/ui-context";
 import { EMPTY_COMPANY, fitScore, stageDef } from "../../lib/pipeline";
 import type { Interest, StageKey } from "../../types";
 import { CheckRow, Field, Grid, OptionList, Seg } from "../common";
+import { EventPicker } from "../EventPicker";
+import { DuplicateWarning } from "./DuplicateWarning";
 
 type Tab = "lead" | "fit" | "route";
 
@@ -23,7 +25,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 interface Form {
   co: string; name: string; title: string; email: string; phone: string; note: string; interest: Interest;
   region: string; platform: string; segment: string; products5: boolean; sellsOut: boolean; reachable: boolean;
-  source: string; entry: StageKey; ownerId: string; demo: boolean; demoAt: string;
+  source: string; event: string; entry: StageKey; ownerId: string; demo: boolean; demoAt: string;
 }
 
 export function CaptureDialog() {
@@ -42,7 +44,8 @@ export function CaptureDialog() {
     return {
       co: "", name: "", title: "", email: "", phone: "", note: "", interest: "Warm",
       region: "", platform: "", segment: "Water / boat", products5: false, sellsOut: false, reachable: true,
-      source: ui.lastSource, entry, ownerId: stageDef(pipeline, entry).ownerId, demo: false, demoAt: "",
+      source: ui.lastSource, event: BOOTH_SOURCES.includes(ui.lastSource) ? ui.lastEvent : "",
+      entry, ownerId: stageDef(pipeline, entry).ownerId, demo: false, demoAt: "",
     };
   };
   const [f, setF] = useState<Form>(initial);
@@ -79,7 +82,7 @@ export function CaptureDialog() {
     // Close or clear only once the server has saved it: on an error the typed lead stays in the form
     create.mutate(
       {
-        pipelineId: pipeline.id, entryStage: entry, source: f.source, interest: f.interest, ownerId: f.ownerId,
+        pipelineId: pipeline.id, entryStage: entry, source: f.source, event: f.event.trim() || undefined, interest: f.interest, ownerId: f.ownerId,
         company: { ...EMPTY_COMPANY, name: co, region: f.region.trim(), segment: f.segment, platform: f.platform, products5: f.products5, sellsOut: f.sellsOut, reachable: f.reachable },
         contact: { name: f.name.trim(), title: f.title.trim(), email, phone: f.phone.trim(), linkedin: "", decisionMaker: false },
         note: f.note.trim() || undefined,
@@ -141,6 +144,7 @@ export function CaptureDialog() {
                 <Seg label="Interest" value={f.interest} onChange={(interest) => set({ interest })} options={INTERESTS.map((v) => [v, v] as const)} />
               </div>
             </Grid>
+            <DuplicateWarning company={f.co} email={f.email} onOpen={ui.closeCapture} />
             <Field id="c_note" label="What they said" className="mt-3">
               <Textarea id="c_note" rows={3} placeholder="Sells out Saturday sunsets weeks ahead. Wants a Snapshot." value={f.note} onChange={(e) => set({ note: e.target.value })} />
             </Field>
@@ -175,6 +179,9 @@ export function CaptureDialog() {
             <Grid>
               <Field id="c_src" label="Lead source">
                 <NativeSelect id="c_src" value={f.source} onChange={(e) => onSource(e.target.value)}><OptionList items={SOURCE_NAMES} /></NativeSelect>
+              </Field>
+              <Field id="c_event" label="Event (if they came from one)">
+                <EventPicker id="c_event" allowNone value={f.event} onChange={(event) => set({ event })} />
               </Field>
               <Field id="c_entry" label="Starts at">
                 <NativeSelect id="c_entry" value={f.entry} onChange={(e) => onEntry(e.target.value as StageKey)}>

@@ -9,6 +9,7 @@ export function filterDeals(deals: Deal[], f: BoardFilters, flags: Map<string, F
     if (q && ![d.company.name, d.contact.name, d.contact.email, d.company.region].join(" ").toLowerCase().includes(q)) return false;
     if (f.ownerId && d.ownerId !== f.ownerId) return false;
     if (f.source && d.source !== f.source) return false;
+    if (f.tier && d.booth?.tier !== f.tier) return false;
     if (f.flagged && !(flags.get(d.id)?.length)) return false;
     return true;
   });

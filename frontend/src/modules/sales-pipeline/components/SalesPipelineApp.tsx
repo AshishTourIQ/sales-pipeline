@@ -8,6 +8,7 @@ import { useData } from "../context/data-context";
 import { useUi } from "../context/ui-context";
 import { BoardView, MobileStageList } from "./board/BoardView";
 import { ListView } from "./board/ListView";
+import { BoothDialog } from "./booth/BoothDialog";
 import { CaptureDialog } from "./dialogs/CaptureDialog";
 import { MoveDialogs } from "./dialogs/MoveDialogs";
 import { DealDrawer } from "./drawer/DealDrawer";
@@ -50,7 +51,7 @@ function Setup() {
     <Empty title="Set up your first pipeline">
       <p className="m-0 mb-4 text-ink-2">This creates the TourIQ pipeline: 13 stages from Target list to Live, an optional Pilot stage, the Nurture and Lost side lanes, and the automation rules from the playbook.</p>
       {canAdmin ? (
-        <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate("TourIQ", {
+        <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate({ name: "TourIQ" }, {
           onSuccess: (p) => { ui.setPipelineId(p.id); saveSettings.mutate(settings); },
         })}>
           Create the TourIQ pipeline
@@ -95,6 +96,7 @@ export function SalesPipelineApp({ className }: { className?: string }) {
       </div>
       <DealDrawer />
       <CaptureDialog />
+      <BoothDialog />
       <MoveDialogs />
     </div>
   );

@@ -13,7 +13,6 @@ from .test_api import new_deal
 
 @pytest.fixture(autouse=True)
 def clean_outbox(settings):
-    settings.RESEND_API_KEY = ""  # never send real mail in tests
     settings.GTM_LEAD_EMAIL = "gunin@touriq.test"
     notify.OUTBOX.clear()
     yield
@@ -78,18 +77,15 @@ def test_late_payment_creates_one_task(api, ws):
 
 def test_email_failure_does_not_undo_the_run(api, ws, settings, monkeypatch):
     """A failed send is logged; other recipients' alerts stay claimed, so nobody is re-emailed next run."""
-    import sys
-    import types
+    from django.core.mail import EmailMultiAlternatives
 
     from sales_pipeline.models import DealAlert
 
-    class Emails:
-        @staticmethod
-        def send(_):
-            raise RuntimeError("Resend is down")
+    def down(self, fail_silently=False):
+        raise OSError("SMTP server is down")
 
-    monkeypatch.setitem(sys.modules, "resend", types.SimpleNamespace(Emails=Emails, api_key=""))
-    settings.RESEND_API_KEY, settings.EMAIL_FROM = "re_test", "alerts@touriq.test"
+    monkeypatch.setattr(EmailMultiAlternatives, "send", down)
+    settings.EMAIL_ENABLED, settings.EMAIL_HOST_USER = True, "alerts@touriq.test"
     d = new_deal(api, ws)["deal"]
     age(d["id"], 5)
     alerts.check_stuck(ws["tenant"].id, alerts.RunReport())  # must not raise

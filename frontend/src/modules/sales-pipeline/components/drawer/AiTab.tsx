@@ -15,11 +15,12 @@ import type { AiAction, Deal, ReplyTag, StageKey } from "../../types";
 import { Field, Section } from "../common";
 
 const AI_ACTIONS: { key: AiAction; label: string; stages: StageKey[] | null; paste?: string; opts?: boolean }[] = [
-  { key: "brief", label: "Draft research brief", stages: ["s1", "s2", "s3", "s6"] },
-  { key: "first", label: "Draft first message", stages: ["s1", "s2", "s3", "s4", "nurture"] },
-  { key: "follow", label: "Draft a follow-up", stages: ["s4", "s5"], opts: true },
+  { key: "brief", label: "Draft research brief", stages: ["s1", "s2", "s3", "s6", "pt1", "pt2", "ch1", "ch2", "rf1"] },
+  { key: "first", label: "Draft first message", stages: ["s1", "s2", "s3", "s4", "nurture", "pt2", "pt3", "ch2", "ch3", "rf1", "rf2"] },
+  { key: "follow", label: "Draft a follow-up", stages: ["s4", "s5", "offer", "pt3", "ch3", "rf2", "rf3"], opts: true },
+  { key: "invite", label: "Draft the demo invite (with the deck)", stages: ["s6"] },
   { key: "tag", label: "Tag a reply", stages: ["s4", "s5"], paste: "Paste their reply" },
-  { key: "summary", label: "Summarize call notes", stages: ["s6", "s7", "s8", "s9", "pilot"], paste: "Paste your call notes or the transcript" },
+  { key: "summary", label: "Summarize call notes", stages: ["s6", "s7", "s8", "s9", "pilot", "pt3", "pt4", "pt5", "ch3", "ch4", "rf2", "rf3"], paste: "Paste your call notes or the transcript" },
   { key: "next", label: "Suggest the next step", stages: null },
 ];
 

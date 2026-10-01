@@ -9,6 +9,25 @@ from sales_pipeline.services.pipelines import create_pipeline, get_settings
 User = get_user_model()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_email(settings):
+    """Never send real mail from tests, even with SMTP set up in .env: team mail goes to
+    notify.OUTBOX, and a test that switches EMAIL_ENABLED on gets Django's in-memory outbox."""
+    settings.EMAIL_ENABLED = False
+    settings.EMAIL_REDIRECT_TO = ""
+    settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cache():
+    """Rate-limit counts and job locks live in the cache: each test starts from zero."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 def make_tenant(slug: str):
     t = Tenant.objects.create(name=slug.title(), slug=slug)
     users = {}

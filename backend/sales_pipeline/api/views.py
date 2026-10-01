@@ -2,22 +2,35 @@
 Thin views: validate input, call one service, shape the output.
 All business logic lives in sales_pipeline/services/.
 """
+import json
 import time
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 
+from core import invites
+from core.models import PipelineRole, User
 from core.tenancy import tenant_context
 from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
-from ..models import AiDraftLog, Deal, Pipeline, Task
+from ..models import AiDraftLog, Deal, IntakeKey, Pipeline, Task
 from ..services import ai
+from ..services import calendar as calendar_svc
+from ..services import intake as intake_svc
+from ..services import recall as recall_svc
+from ..services import touchpoints as tp_svc
+from ..services import booth as booth_svc
+from ..services import duplicates as dup_svc
+from ..services import speed as speed_svc
 from ..services import deals as deal_svc
 from ..services import importer, samples, stage_tasks
 from ..services import stages as stage_svc
@@ -26,7 +39,7 @@ from ..models import StageTaskTemplate
 from ..services import pipelines as pipe_svc
 from ..services.errors import ServiceError
 from . import serializers as S
-from .base import WRITES, TenantScopedMixin
+from .base import WRITES, TenantScopedMixin, paged
 
 # Sub-routes subclass a detail view for its _get(); only their own verb is routed
 POST_ONLY = ["post", "options"]
@@ -49,7 +62,7 @@ class PipelineListView(TenantScopedMixin, APIView):
 
     def post(self, request: Request) -> Response:
         data = _valid(S.PipelineIn, request.data)
-        p = pipe_svc.create_pipeline(self.tenant_id, data.get("name", ""))
+        p = pipe_svc.create_pipeline(self.tenant_id, data.get("name", ""), data.get("template", "touriq"))
         return Response(S.PipelineOut(p).data, status=status.HTTP_201_CREATED)
 
 
@@ -112,6 +125,15 @@ class PipelineImportView(PipelineDetailView):
         return Response(importer.import_rows(self.tenant_id, p, self.actor, [dict(r) for r in data["rows"]]))
 
 
+class PipelineHandoffsView(PipelineDetailView):
+    """Bring the partner hand-offs that fit a Partnerships / Referrals pipeline into it."""
+
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        return Response({"moved": deal_svc.import_handoffs(self.tenant_id, self._get(pk), self.actor)})
+
+
 class PipelineSamplesView(PipelineDetailView):
     http_method_names = ["post", "delete", "options"]
 
@@ -129,11 +151,29 @@ class DealListView(TenantScopedMixin, APIView):
         qs = Deal.objects.filter(tenant_id=self.tenant_id)
         if pid := request.query_params.get("pipeline"):
             qs = qs.filter(pipeline_id=pid)
-        return Response([S.deal_out(d) for d in S.deal_queryset(qs)])
+        return Response(paged(request, S.deal_queryset(qs).order_by("created_at", "id"), S.deal_out))
 
     def post(self, request: Request) -> Response:
         data = _valid(S.DealCreateIn, request.data)
         r = deal_svc.create_deal(self.tenant_id, self.actor, data)
+        return Response(S.result_out(r), status=status.HTTP_201_CREATED)
+
+
+class DealDuplicatesView(TenantScopedMixin, APIView):
+    """Deals that look like the lead being typed (?company=&email=&website=). Warns only."""
+
+    def get(self, request: Request) -> Response:
+        p = request.query_params
+        return Response(dup_svc.find(self.tenant_id, company=p.get("company", "")[:200],
+                                     email=p.get("email", "")[:254], website=p.get("website", "")[:300]))
+
+
+class DealBoothView(TenantScopedMixin, APIView):
+    """The booth lead form: scores the sheet and files the visitor in one call."""
+
+    def post(self, request: Request) -> Response:
+        data = _valid(S.BoothLeadIn, request.data)
+        r = booth_svc.create_booth_lead(self.tenant_id, self.actor, data)
         return Response(S.result_out(r), status=status.HTTP_201_CREATED)
 
 
@@ -157,7 +197,13 @@ class DealDetailView(TenantScopedMixin, APIView):
         return Response({"deal": S.deal_out(self._get(pk)), "advanced": S.result_out_or_none(advanced)})
 
     def delete(self, request: Request, pk) -> Response:
-        self._get(pk).delete()
+        # Deleting also deletes the stage history and activity: admins only (others move it to Lost).
+        # Checked here, not with admin_methods, so the sub-routes that subclass this view still answer 405.
+        if not request.user.can_admin_pipeline:
+            raise ServiceError("Only a pipeline admin can delete a deal. Move it to Lost instead.", code="admin_only", status=403)
+        d = self._get(pk)
+        calendar_svc.queue_delete(self.tenant_id, d.id, d.calendar_event_id)
+        d.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -174,8 +220,69 @@ class DealActivityView(DealDetailView):
 
     def post(self, request: Request, pk) -> Response:
         data = _valid(S.ActivityIn, request.data)
-        deal_svc.add_activity(self._get(pk), data["type"], data["text"], self.actor)
+        deal_svc.add_activity(self._get(pk), data["type"], data["text"], self.actor, attendees=data["attendee_ids"])
         return Response(S.deal_out(self._get(pk)), status=status.HTTP_201_CREATED)
+
+
+class DealTouchpointView(DealDetailView):
+    """A person records a journey step (e.g. "Audit report sent", with the report link)."""
+
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.TouchpointIn, request.data)
+        tp_svc.record(self._get(pk), data["kind"], self.actor, source="manual", score=data["score"], link=data["link"], detail=data["detail"])
+        return Response(S.deal_out(self._get(pk)), status=status.HTTP_201_CREATED)
+
+
+class DealCalendarView(DealDetailView):
+    """Sync the deal's demo / meeting to the team calendar now (and see any error)."""
+
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        result = calendar_svc.sync_deal(self._get(pk))
+        return Response({"result": result, "deal": S.deal_out(self._get(pk))})
+
+
+class DealCallTypeView(DealDetailView):
+    """Second call: team demo or commercial call. Swaps the stage's tasks."""
+
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.CallTypeIn, request.data)
+        return Response(S.result_out(deal_svc.set_call_type(self.tenant_id, pk, self.actor, data["call_type"])))
+
+
+class DealTransferView(DealDetailView):
+    """Move the deal to another pipeline (e.g. a partner hand-off into Partnerships)."""
+
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.TransferIn, request.data)
+        return Response(S.result_out(deal_svc.transfer_deal(self.tenant_id, pk, self.actor, data["pipeline_id"], data["stage"])))
+
+
+class ActivityDetailView(TenantScopedMixin, APIView):
+    """Fix who was on a call or meeting."""
+
+    def patch(self, request: Request, pk) -> Response:
+        from ..config import ATTENDED_TYPES
+        from ..models import Activity
+
+        a = Activity.objects.filter(tenant_id=self.tenant_id, id=pk).first()
+        if a is None:
+            raise ServiceError("Entry not found.", code="not_found", status=404)
+        data = _valid(S.ActivityPatchIn, request.data, partial=True)
+        if "attendee_ids" in data:
+            if a.type not in ATTENDED_TYPES:
+                raise ServiceError("Only calls and meetings have attendees.", code="invalid_type")
+            a.attendees = deal_svc.clean_attendees(self.tenant_id, data["attendee_ids"])
+            a.save(update_fields=["attendees"])
+        deal = S.deal_queryset(Deal.objects.filter(id=a.deal_id)).get()
+        return Response(S.deal_out(deal))
 
 
 class DealExpansionView(DealDetailView):
@@ -231,7 +338,7 @@ class TaskListView(TenantScopedMixin, APIView):
         qs = Task.objects.filter(tenant_id=self.tenant_id)
         if pid := request.query_params.get("pipeline"):
             qs = qs.filter(pipeline_id=pid)
-        return Response([S.task_out(t) for t in qs])
+        return Response(paged(request, qs.order_by("created_at", "id"), S.task_out))
 
     def post(self, request: Request) -> Response:
         data = _valid(S.TaskCreateIn, request.data)
@@ -268,6 +375,7 @@ class TaskDetailView(TenantScopedMixin, APIView):
             t.done_at = timezone.now() if t.done else None
             t.auto_closed = False
         t.save()
+        speed_svc.on_task_done(t)
         advanced = None
         if data.get("done") and t.deal_id and t.deal and t.stage == t.deal.stage:
             advanced = deal_svc.maybe_advance(self.tenant_id, t.deal_id, self.actor)
@@ -308,18 +416,216 @@ class StageTaskDetailView(TenantScopedMixin, APIView):
 # ---------------- users ----------------
 
 class UserListView(TenantScopedMixin, APIView):
-    """Workspace users who can use the pipeline: the pool the Team picker chooses from."""
+    """
+    Workspace users who can use the pipeline: the pool the Team picker chooses from.
+    POST (admin) invites someone by email: they get a link to set their password.
+    """
+
+    admin_methods = WRITES
 
     def get(self, request: Request) -> Response:
-        from django.contrib.auth import get_user_model
+        users = User.objects.filter(tenant_id=self.tenant_id, is_active=True).exclude(pipeline_role=PipelineRole.NONE)
+        return Response([_user_out(u) for u in users.order_by("full_name", "username")])
 
-        from core.models import PipelineRole
+    def post(self, request: Request) -> Response:
+        data = _valid(S.InviteIn, request.data)
+        try:
+            u, sent = invites.invite_user(self.tenant_id, request.user, email=data["email"], name=data["name"],
+                                          role=data["role"], sales_team=data["sales_team"])
+        except invites.InviteError as e:
+            raise ServiceError(e.detail, code=e.code, status=e.status)
+        return Response({**_user_out(u), "email_sent": sent}, status=status.HTTP_201_CREATED)
 
-        users = get_user_model().objects.filter(tenant_id=self.tenant_id, is_active=True).exclude(pipeline_role=PipelineRole.NONE)
-        return Response([
-            {"id": str(u.id), "name": u.display_name, "email": u.email, "is_sales_team": u.is_sales_team}
-            for u in users.order_by("full_name", "username")
-        ])
+
+class UserResendInviteView(TenantScopedMixin, APIView):
+    admin_methods = WRITES
+    http_method_names = POST_ONLY
+
+    def post(self, request: Request, pk) -> Response:
+        u = User.objects.filter(tenant_id=self.tenant_id, id=pk, is_active=True).first()
+        if u is None:
+            raise ServiceError("Person not found.", code="not_found", status=404)
+        try:
+            sent = invites.send_invite(u, request.user)
+        except invites.InviteError as e:
+            raise ServiceError(e.detail, code=e.code, status=e.status)
+        return Response({**_user_out(u), "email_sent": sent})
+
+
+def _user_out(u) -> dict:
+    return {"id": str(u.id), "name": u.display_name, "email": u.email, "is_sales_team": u.is_sales_team,
+            "role": u.pipeline_role, "pending": invites.is_pending(u)}
+
+
+# ---------------- intake (game, analysis, audit tools) ----------------
+
+def _intake_key(request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.headers.get("X-Intake-Key", "").strip()
+
+
+class IntakeIPThrottle(SimpleRateThrottle):
+    """Per calling address, whatever key it sends: INTAKE_IP_RATE. Made-up keys get no fresh allowance."""
+
+    scope = "intake_ip"
+
+    def get_rate(self):
+        return settings.INTAKE_IP_RATE
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
+class IntakeKeyThrottle(SimpleRateThrottle):
+    """Per intake key, once it's known to be real: INTAKE_RATE (e.g. 120/min)."""
+
+    scope = "intake_key"
+    setting = "INTAKE_RATE"
+
+    def __init__(self, key_id):
+        self.key_id = str(key_id)
+        super().__init__()
+
+    def get_rate(self):
+        return getattr(settings, self.setting)
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.key_id}
+
+
+class IntakeKeyDailyThrottle(IntakeKeyThrottle):
+    """...and per day (INTAKE_DAILY_RATE), so a leaked key can't flood the pipeline."""
+
+    scope = "intake_key_day"
+    setting = "INTAKE_DAILY_RATE"
+
+
+def _bad_key_cache_key(request) -> str:
+    return f"intake_bad_key:{IntakeIPThrottle().get_ident(request)}"
+
+
+class IntakeView(APIView):
+    """
+    Public endpoint for the outside tools. Authenticated by an intake key, not a user;
+    the key decides the tenant (and scopes RLS). See docs/INTAKE_API.md.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+    throttle_classes = [IntakeIPThrottle]
+
+    def post(self, request: Request) -> Response:
+        # An address that keeps sending wrong keys is guessing: stop answering it for an hour
+        bad = _bad_key_cache_key(request)
+        if (cache.get(bad) or 0) >= settings.INTAKE_BAD_KEY_LIMIT:
+            self.throttled(request, 3600)
+        try:
+            key = intake_svc.authenticate(_intake_key(request))
+        except ServiceError:
+            if not cache.add(bad, 1, 3600):
+                try:
+                    cache.incr(bad)
+                except ValueError:  # expired in between
+                    cache.add(bad, 1, 3600)
+            raise
+        for t in (IntakeKeyThrottle(key.id), IntakeKeyDailyThrottle(key.id)):
+            if not t.allow_request(request, self):
+                self.throttled(request, t.wait())
+        data = _valid(S.IntakeIn, request.data)
+        r = intake_svc.handle_event(key, data)
+        body = {"deal_id": str(r.deal.id), "stage": r.deal.stage, "created": r.created, "duplicate": r.duplicate,
+                "touchpoint_id": str(r.touchpoint.id) if r.touchpoint else None}
+        return Response(body, status=status.HTTP_201_CREATED if r.created else status.HTTP_200_OK)
+
+
+class IntakeKeyListView(TenantScopedMixin, APIView):
+    # Keys are secrets: listing them is admin-only too
+    admin_methods = frozenset({"GET", "POST"})
+
+    def get(self, request: Request) -> Response:
+        # Reads normally only need view access; keys are pipeline set-up
+        if not request.user.can_admin_pipeline:
+            raise ServiceError("Only a pipeline admin can see intake keys.", code="admin_only", status=403)
+        return Response([intake_svc.key_out(k) for k in IntakeKey.objects.filter(tenant_id=self.tenant_id)])
+
+    def post(self, request: Request) -> Response:
+        data = _valid(S.IntakeKeyIn, request.data)
+        k, secret = intake_svc.create_key(self.tenant_id, self.actor, data["name"])
+        return Response({"key": intake_svc.key_out(k), "secret": secret}, status=status.HTTP_201_CREATED)
+
+
+class IntakeKeyDetailView(TenantScopedMixin, APIView):
+    admin_methods = WRITES
+
+    def delete(self, request: Request, pk) -> Response:
+        n = IntakeKey.objects.filter(tenant_id=self.tenant_id, id=pk, active=True).update(active=False)
+        if not n:
+            raise ServiceError("Key not found.", code="not_found", status=404)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------- Recall.ai (recorded calls) ----------------
+
+class RecallWebhookView(APIView):
+    """
+    Recall posts here (URL per tenant). Signed with the workspace secret; answers at once
+    and processes in the worker. See services/recall.py.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request: Request, tenant_id) -> Response:
+        from core.models import Tenant
+        from core.tenancy import set_current_tenant
+
+        if not recall_svc.enabled():
+            raise ServiceError("Recorded calls aren't set up on this server.", code="recall_off", status=503)
+        raw = request.body  # read before DRF parses it: the signature covers the exact bytes
+        recall_svc.verify(request.headers, raw)
+        if not Tenant.objects.filter(id=tenant_id).exists():
+            raise ServiceError("Unknown workspace.", code="not_found", status=404)
+        set_current_tenant(tenant_id)
+        try:
+            payload = json.loads(raw or b"{}")
+        except ValueError:
+            raise ServiceError("Not JSON.", code="invalid")
+        m = recall_svc.record_webhook(tenant_id, payload)
+        if m is not None:
+            recall_svc.queue("process_recording_task", tenant_id, m.id)
+        return Response({"ok": True})
+
+
+class RecordingListView(TenantScopedMixin, APIView):
+    """Recorded calls that need a person: not matched to a deal, or failed."""
+
+    def get(self, request: Request) -> Response:
+        from ..models import RecallMeeting
+
+        qs = RecallMeeting.objects.filter(tenant_id=self.tenant_id)
+        st = request.query_params.get("status", "unmatched")
+        qs = qs.filter(status__in=st.split(",")) if st != "all" else qs
+        return Response([recall_svc.meeting_out(m) for m in qs[:100]])
+
+
+class RecordingLinkView(TenantScopedMixin, APIView):
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.RecordingLinkIn, request.data)
+        m = recall_svc.link_manually(self.tenant_id, pk, data["deal_id"], self.actor)
+        recall_svc.queue("summarise_recording_task", self.tenant_id, m.id)
+        return Response(recall_svc.meeting_out(m))
+
+
+class RecordingDismissView(TenantScopedMixin, APIView):
+    def post(self, request: Request, pk) -> Response:
+        from ..models import RecallMeeting
+
+        n = RecallMeeting.objects.filter(tenant_id=self.tenant_id, id=pk).exclude(status="logged").update(status="dismissed")
+        if not n:
+            raise ServiceError("Recording not found, or already on a deal.", code="not_found", status=404)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------- settings ----------------
@@ -330,11 +636,20 @@ class SettingsView(TenantScopedMixin, APIView):
     def _out(self) -> dict:
         s = pipe_svc.get_settings(self.tenant_id)
         team = [{"id": str(u.id), "name": u.display_name} for u in pipe_svc.team_users(self.tenant_id)]
-        return {"team": team, "rules": pipe_svc.rules_for(self.tenant_id), "targets": s.targets}
+        return {"team": team, "rules": pipe_svc.rules_for(self.tenant_id), "targets": s.targets,
+                "booth_followup": booth_svc.followup_defaults(self.tenant_id), "links": s.links or {}, "event_costs": s.event_costs or {},
+                "integrations": {
+                    "calendar": calendar_svc.enabled(), "calendar_invites": bool(settings.GOOGLE_DELEGATED_USER),
+                    "recall": recall_svc.enabled(),
+                    "recall_webhook_url": self.request.build_absolute_uri(f"/api/sales-pipeline/webhooks/recall/{self.tenant_id}/"),
+                }}
 
     def get(self, request: Request) -> Response:
         return Response(self._out())
 
     def patch(self, request: Request) -> Response:
-        pipe_svc.update_settings(self.tenant_id, _valid(S.SettingsIn, request.data, partial=True))
+        data = _valid(S.SettingsIn, request.data, partial=True)
+        pipe_svc.update_settings(self.tenant_id, data)
+        if "booth_followup" in data:
+            booth_svc.set_followup_defaults(self.tenant_id, data["booth_followup"])
         return Response(self._out())

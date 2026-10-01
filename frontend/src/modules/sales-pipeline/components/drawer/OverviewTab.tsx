@@ -8,9 +8,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { cn } from "@/lib/utils";
-import { errorMessage, useCreateExpansion, useDeleteDeal, useUpdateDeal, useUpdateTask } from "../../api/hooks";
+import { errorMessage, useCreateExpansion, useDeleteDeal, useSyncCalendar, useUpdateDeal, useUpdateTask } from "../../api/hooks";
 import {
-  CHECKLISTS, INTERESTS, ONBOARD_ITEMS, PAY_STATUS, PILOT_ITEMS, PLATFORMS, QUAL_ITEMS, SEGMENTS, SOURCE_NAMES,
+  CATEGORIES, CHECKLISTS, INTERESTS, isCompetitor, ONBOARD_ITEMS, PAY_STATUS, PILOT_ITEMS, PLATFORMS, QUAL_ITEMS, SEGMENTS, SOURCE_NAMES,
   type ChecklistItem,
 } from "../../config/template";
 import { useData } from "../../context/data-context";
@@ -19,15 +19,19 @@ import { dueLabel, fmtDay, today } from "../../lib/dates";
 import { requirements } from "../../lib/gating";
 import { TaskRow } from "../tasks/TaskRow";
 import { fitScore, nextStageOf, reachedOrPast, routesFor, stageDef } from "../../lib/pipeline";
-import type { Checklist, Deal, DealPatch, Interest, PaymentStatus, StageKey } from "../../types";
+import type { Checklist, CompanyCategory, Deal, DealPatch, Interest, PaymentStatus, StageKey } from "../../types";
 import { CheckRow, Field, Grid, KV, OptionList, Section } from "../common";
 import { ConfirmDialog } from "../dialogs/ConfirmDialog";
+import { EventPicker } from "../EventPicker";
+import { BoothSection } from "./BoothSection";
+import { JourneySection } from "./JourneySection";
+import { InvolvementSection, LinksSection, NextCallSection, TransferControl } from "./DealExtras";
 
 type ChecklistField = "qual" | "pilotChecks" | "onboarding";
 
 export function OverviewTab({ deal }: { deal: Deal }) {
   const ui = useUi();
-  const { label, openTasks, memberName, canWrite, pipeline } = useData();
+  const { label, openTasks, memberName, canWrite, canAdmin, pipeline, settings } = useData();
   const update = useUpdateDeal();
   const updateTask = useUpdateTask();
   const expand = useCreateExpansion();
@@ -36,7 +40,8 @@ export function OverviewTab({ deal }: { deal: Deal }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const patch = (p: DealPatch) => update.mutate({ deal, patch: p });
 
-  const routes = routesFor(pipeline, deal.stage);
+  const competitor = isCompetitor(deal);
+  const routes = competitor ? [] : routesFor(pipeline, deal.stage);
   const nextAfter = nextStageOf(pipeline, deal.stage);
   const open = openTasks.get(deal.id) ?? [];
   const nt = open[0];
@@ -68,6 +73,8 @@ export function OverviewTab({ deal }: { deal: Deal }) {
               </Button>
             ))}
           </div>
+        ) : competitor ? (
+          <p className="m-0 rounded-lg bg-danger-soft px-3 py-2 font-medium text-danger">Competitor: do not contact. No messages, no invites. It stays in Lost.</p>
         ) : (
           <p className="m-0 text-ink-3">Active client. Referrals and expansion become new deals.</p>
         )}
@@ -115,7 +122,12 @@ export function OverviewTab({ deal }: { deal: Deal }) {
             <Field id="demoDate" label="Demo date">
               <Input id="demoDate" type="datetime-local" disabled={!canWrite} defaultValue={deal.demoDate} onBlur={(e) => { if (e.target.value !== deal.demoDate) patch({ demoDate: e.target.value }); }} />
             </Field>
+            <Field id="meetUrl" label="Meeting link">
+              <Input id="meetUrl" type="url" placeholder={settings.integrations?.calendarInvites ? "Added from the calendar event" : "https://zoom.us/j/..."} disabled={!canWrite}
+                key={deal.meetingUrl} defaultValue={deal.meetingUrl} onBlur={(e) => { const v = e.target.value.trim(); if (v !== deal.meetingUrl) patch({ meetingUrl: v }); }} />
+            </Field>
           </Grid>
+          <CalendarLine deal={deal} />
         </Section>
       )}
 
@@ -141,13 +153,21 @@ export function OverviewTab({ deal }: { deal: Deal }) {
 
       {(!!deal.signedAt || reachedOrPast(pipeline, deal, "s11")) && <PaymentSection deal={deal} onPatch={patch} />}
 
+      <NextCallSection deal={deal} />
+      <JourneySection deal={deal} />
+      <InvolvementSection deal={deal} />
+      <LinksSection deal={deal} />
+      <BoothSection deal={deal} />
+
       <Section title="Company and contact" right={canWrite && !editing ? <Button size="sm" onClick={() => setEditing(true)}>Edit</Button> : undefined}>
         {editing ? <DetailsForm deal={deal} onDone={() => setEditing(false)} /> : <DetailsView deal={deal} />}
       </Section>
 
       {canWrite && (
         <Section>
-          <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>Delete this deal</Button>
+          {/* Deleting also removes the stage history: admins only. Others move a dead deal to Lost. */}
+          {canAdmin && <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)}>Delete this deal</Button>}
+          <TransferControl deal={deal} />
           <ConfirmDialog
             open={confirmDelete}
             onOpenChange={setConfirmDelete}
@@ -160,6 +180,24 @@ export function OverviewTab({ deal }: { deal: Deal }) {
         </Section>
       )}
     </>
+  );
+}
+
+/** Where the demo stands on the team's Google Calendar (when the server has it set up). */
+function CalendarLine({ deal }: { deal: Deal }) {
+  const { settings, canWrite } = useData();
+  const sync = useSyncCalendar();
+  if (!settings.integrations?.calendar) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-[13px]">
+      {deal.onCalendar
+        ? <span className="text-ok">On the team calendar.</span>
+        : <span className="text-ink-2">{deal.demoDate ? "Not on the team calendar yet." : "Set a demo date to put it on the team calendar."}</span>}
+      {deal.meetingUrl && <a className="text-info hover:underline" href={deal.meetingUrl} target="_blank" rel="noopener noreferrer">Join link</a>}
+      {canWrite && deal.demoDate && (
+        <Button size="xs" disabled={sync.isPending} onClick={() => sync.mutate(deal.id)}>{deal.onCalendar ? "Sync again" : "Add to calendar"}</Button>
+      )}
+    </div>
   );
 }
 
@@ -187,7 +225,7 @@ function PaymentSection({ deal, onPatch }: { deal: Deal; onPatch: (p: DealPatch)
 }
 
 function DetailsView({ deal }: { deal: Deal }) {
-  const { memberName } = useData();
+  const { memberName, pipeline } = useData();
   const c = deal.company, ct = deal.contact;
   const href = (u: string) => (/^https?:\/\//i.test(u) ? u : `https://${u}`);
   return (
@@ -202,8 +240,14 @@ function DetailsView({ deal }: { deal: Deal }) {
       <KV label="Region" value={c.region} />
       <KV label="Segment" value={c.segment} />
       <KV label="Booking platform" value={c.platform} />
+      <KV label="Company type" value={CATEGORIES.find(([k]) => k === c.category)?.[1]} />
       <KV label="Fit score" value={`${deal.fit} of 5`} />
       <KV label="Lead source" value={deal.source} />
+      <KV label="Event" value={deal.event} />
+      {deal.metById && <KV label="Met by" value={memberName(deal.metById)} />}
+      <KV label="Account manager" value={memberName(deal.accountManagerId)} />
+      {(pipeline?.template === "referrals" || deal.commissionPct != null) && <KV label="Commission we pay" value={deal.commissionPct != null ? `${deal.commissionPct}%` : ""} />}
+      {(pipeline?.template === "referrals" || deal.commissionInPct != null) && <KV label="Commission they pay us" value={deal.commissionInPct != null ? `${deal.commissionInPct}%` : ""} />}
       <KV label="Owner" value={memberName(deal.ownerId)} />
       <KV label="Interest" value={deal.interest} />
       <KV label="Package" value={deal.package} />
@@ -215,11 +259,15 @@ function DetailsView({ deal }: { deal: Deal }) {
 }
 
 function DetailsForm({ deal, onDone }: { deal: Deal; onDone: () => void }) {
-  const { team } = useData();
+  const { team, pipeline } = useData();
+  const [am, setAm] = useState(deal.accountManagerId ?? "");
+  const [pct, setPct] = useState(deal.commissionPct != null ? String(deal.commissionPct) : "");
+  const [pctIn, setPctIn] = useState(deal.commissionInPct != null ? String(deal.commissionInPct) : "");
+  const toPct = (v: string) => (v.trim() === "" ? null : Math.min(100, Math.max(0, Number(v) || 0)));
   const update = useUpdateDeal();
   const [c, setC] = useState(deal.company);
   const [ct, setCt] = useState(deal.contact);
-  const [d, setD] = useState({ source: deal.source, ownerId: deal.ownerId, interest: deal.interest, package: deal.package, value: deal.value, locations: deal.locations });
+  const [d, setD] = useState({ source: deal.source, event: deal.event ?? "", ownerId: deal.ownerId, interest: deal.interest, package: deal.package, value: deal.value, locations: deal.locations });
   const txt = (id: string, lbl: string, val: string, on: (v: string) => void, type = "text") => (
     <Field id={id} label={lbl}><Input id={id} type={type} value={val} onChange={(e) => on(e.target.value)} /></Field>
   );
@@ -231,7 +279,13 @@ function DetailsForm({ deal, onDone }: { deal: Deal; onDone: () => void }) {
     setErr("");
     // Close only once saved: on an error the edits stay in the form
     update.mutate(
-      { deal: { ...deal, fit: fitScore(company) }, patch: { company, contact, ...d, interest: d.interest as Interest | "" } },
+      {
+        deal: { ...deal, fit: fitScore(company) },
+        patch: {
+          company, contact, ...d, interest: d.interest as Interest | "", accountManagerId: am,
+          commissionPct: toPct(pct), commissionInPct: toPct(pctIn),
+        },
+      },
       { onSuccess: () => { toast("Details saved."); onDone(); }, onError: (e) => setErr(`Not saved: ${errorMessage(e)}`) },
     );
   };
@@ -243,11 +297,20 @@ function DetailsForm({ deal, onDone }: { deal: Deal; onDone: () => void }) {
         {txt("e_region", "City or region", c.region, (region) => setC({ ...c, region }))}
         <Field id="e_seg" label="Segment"><NativeSelect id="e_seg" value={c.segment} onChange={(e) => setC({ ...c, segment: e.target.value })}><OptionList items={SEGMENTS} blank="Not set" /></NativeSelect></Field>
         <Field id="e_plat" label="Booking platform"><NativeSelect id="e_plat" value={c.platform} onChange={(e) => setC({ ...c, platform: e.target.value })}><OptionList items={PLATFORMS} blank="Not set" /></NativeSelect></Field>
+        <Field id="e_cat" label="Company type">
+          <NativeSelect id="e_cat" value={c.category ?? ""} onChange={(e) => setC({ ...c, category: e.target.value as CompanyCategory | "" })}>
+            <option value="">Not set</option>
+            {CATEGORIES.map(([k, text]) => <option key={k} value={k}>{text}</option>)}
+          </NativeSelect>
+        </Field>
         {txt("e_name", "Contact name", ct.name, (name) => setCt({ ...ct, name }))}
         {txt("e_title", "Role", ct.title, (title) => setCt({ ...ct, title }))}
         {txt("e_email", "Email", ct.email, (email) => setCt({ ...ct, email }), "email")}
         {txt("e_phone", "Phone", ct.phone, (phone) => setCt({ ...ct, phone }), "tel")}
         {txt("e_li", "LinkedIn", ct.linkedin, (linkedin) => setCt({ ...ct, linkedin }))}
+        <Field id="e_event" label="Event">
+          <EventPicker id="e_event" allowNone value={d.event} onChange={(event) => setD({ ...d, event })} />
+        </Field>
         <Field id="e_src" label="Lead source"><NativeSelect id="e_src" value={d.source} onChange={(e) => setD({ ...d, source: e.target.value })}><OptionList items={SOURCE_NAMES} blank="Not set" /></NativeSelect></Field>
         <Field id="e_owner" label="Owner">
           <NativeSelect id="e_owner" value={d.ownerId} onChange={(e) => setD({ ...d, ownerId: e.target.value })}>
@@ -259,6 +322,18 @@ function DetailsForm({ deal, onDone }: { deal: Deal; onDone: () => void }) {
         {txt("e_pkg", "Package", d.package, (v) => setD({ ...d, package: v }))}
         {txt("e_val", "Monthly value", d.value, (v) => setD({ ...d, value: v }))}
         {txt("e_loc", "Locations", d.locations, (v) => setD({ ...d, locations: v }))}
+        <Field id="e_am" label="Account manager">
+          <NativeSelect id="e_am" value={am} onChange={(e) => setAm(e.target.value)}>
+            <option value="">Not set</option>
+            {team.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </NativeSelect>
+        </Field>
+        {(pipeline?.template === "referrals" || deal.commissionPct != null) && (
+          <>
+            <Field id="e_pct" label="Commission we pay them %"><Input id="e_pct" type="number" min={0} max={100} step="0.5" value={pct} onChange={(e) => setPct(e.target.value)} /></Field>
+            <Field id="e_pctin" label="Commission they pay us %"><Input id="e_pctin" type="number" min={0} max={100} step="0.5" value={pctIn} onChange={(e) => setPctIn(e.target.value)} /></Field>
+          </>
+        )}
       </Grid>
       <div className="mt-2.5">
         <CheckRow checked={ct.decisionMaker} onChange={(decisionMaker) => setCt({ ...ct, decisionMaker })}>Decision-maker confirmed</CheckRow>

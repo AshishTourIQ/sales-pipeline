@@ -46,6 +46,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const deals = dq.data ?? EMPTY_DEALS;
   const tasks = tq.data ?? EMPTY_TASKS;
   const settings = sq.data;
+  // Loaded once is enough: a failed background refresh keeps the last data on screen
+  const ready = pq.dataUpdatedAt > 0 && (!pipeline || (dq.dataUpdatedAt > 0 && tq.dataUpdatedAt > 0)) && sq.dataUpdatedAt > 0;
 
   const value = useMemo<DataValue>(() => {
     const team = settings.team.filter((m) => m.name);
@@ -55,8 +57,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const me = currentUser ?? team.find((m) => m.id === ui.meId) ?? null;
     const err = pq.error ?? dq.error ?? tq.error ?? sq.error;
     return {
-      ready: pq.isSuccess && (!pipeline || (dq.isSuccess && tq.isSuccess)) && sq.isSuccess,
-      error: err ? "Couldn't load the pipeline. Check your connection and reload." : null,
+      ready,
+      error: !err ? null : ready ? "Couldn't refresh the pipeline. Showing the last data loaded." : "Couldn't load the pipeline. Check your connection.",
       pipelines,
       pipeline,
       stages: stagesOf(pipeline),
@@ -73,7 +75,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       canWrite,
       canAdmin,
     };
-  }, [deals, tasks, settings, pipeline, pipelines, currentUser, ui.meId, canWrite, canAdmin, pq.isSuccess, dq.isSuccess, tq.isSuccess, sq.isSuccess, pq.error, dq.error, tq.error, sq.error]);
+  }, [deals, tasks, settings, pipeline, pipelines, currentUser, ui.meId, canWrite, canAdmin, ready, pq.error, dq.error, tq.error, sq.error]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

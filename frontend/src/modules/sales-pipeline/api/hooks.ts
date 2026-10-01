@@ -1,13 +1,14 @@
 "use client";
 
 import { useIsMutating, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DEFAULT_SETTINGS } from "../config/template";
 import { useModule } from "../context/module-context";
 import { stageLabel } from "../lib/pipeline";
+import { scoreBooth } from "../lib/scoring";
 import type {
-  ActivityType, CreateDealInput, CreateStageTaskInput, CreateTaskInput, Deal, DealMutationResult, DealPatch, ImportRow,
+  ActivityType, AddTouchpointInput, CallType, CreateBoothLeadInput, PipelineTemplate, CreateDealInput, InviteInput, CreateStageTaskInput, CreateTaskInput, Deal, DealMutationResult, DealPatch, ImportRow,
   MoveDealInput, Pipeline, PipelineSettings, StageTaskTemplate, Task, TaskPatch, AddStageInput, StageKey,
 } from "../types";
 import type { PipelinePatch } from "./types";
@@ -61,8 +62,32 @@ export function useSettings() {
     ...raw,
     rules: { ...DEFAULT_SETTINGS.rules, ...raw?.rules },
     targets: { ...DEFAULT_SETTINGS.targets, ...raw?.targets },
+    boothFollowup: { ...DEFAULT_SETTINGS.boothFollowup, ...raw?.boothFollowup },
   }), [raw]);
   return { ...q, data };
+}
+
+/**
+ * "Already in the pipeline?" while a new lead is typed. Waits for a pause in typing;
+ * offline or on an error it just shows nothing (it only ever warns).
+ */
+export function useDuplicates(input: { company: string; email: string; website?: string }, enabled = true) {
+  const { api } = useModule();
+  const [q, setQ] = useState(input);
+  const { company, email, website = "" } = input;
+  useEffect(() => {
+    const t = setTimeout(() => setQ({ company, email, website }), 400);
+    return () => clearTimeout(t);
+  }, [company, email, website]);
+  const c = q.company.trim(), e = q.email.trim(), w = (q.website ?? "").trim();
+  const ready = c.length >= 3 || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e) || w.includes(".");
+  return useQuery({
+    queryKey: [...qk.all, "duplicates", c.toLowerCase(), e.toLowerCase(), w.toLowerCase()],
+    queryFn: () => api.findDuplicates!({ company: c, email: e, website: w }),
+    enabled: enabled && ready && !!api.findDuplicates,
+    staleTime: 60_000,
+    retry: false,
+  });
 }
 
 export const useSaving = (): boolean => useIsMutating({ mutationKey: qk.all }) > 0;
@@ -106,6 +131,21 @@ export function useCreateDeal() {
   });
 }
 
+export function useCreateBoothLead() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "createBoothLead"],
+    mutationFn: (input: CreateBoothLeadInput) => api.createBoothLead(input),
+    onSuccess: (r) => { applyResult(qc, r); void qc.invalidateQueries({ queryKey: qk.pipelines() }); },
+    // The form handles errors itself: a dropped connection keeps the lead on the device.
+    // "always": offline, the request fails straight away (and goes to the device queue)
+    // instead of pausing in memory until the connection is back, and being lost on close.
+    networkMode: "always",
+    retry: false,
+  });
+}
+
 export function useMoveDeal(labelOf: (d: Deal) => string) {
   const { api } = useModule();
   const qc = useQueryClient();
@@ -136,7 +176,10 @@ export function useUpdateDeal() {
     onMutate: ({ deal, patch }) => {
       const key = qk.deals(deal.pipelineId);
       const prev = qc.getQueryData<Deal[]>(key);
-      putDeal(qc, { ...deal, ...patch });
+      const { booth, ...rest } = patch;
+      // A booth patch is partial: merge it and re-score so the tier updates at once
+      const merged = booth && deal.booth ? { ...deal.booth, ...booth } : deal.booth;
+      putDeal(qc, { ...deal, ...rest, booth: merged ? { ...merged, ...scoreBooth(merged.visitor, merged.answers) } : null });
       return { prev, key };
     },
     onSuccess: (r) => { putDeal(qc, r.deal); onAdvanced(qc, r.advanced); },
@@ -149,8 +192,59 @@ export function useAddActivity() {
   const qc = useQueryClient();
   return useMutation({
     mutationKey: [...qk.all, "addActivity"],
-    mutationFn: ({ dealId, type, text }: { dealId: string; type: ActivityType; text: string }) => api.addActivity(dealId, type, text),
+    mutationFn: ({ dealId, type, text, attendeeIds }: { dealId: string; type: ActivityType; text: string; attendeeIds?: string[] }) =>
+      api.addActivity(dealId, type, text, attendeeIds),
     onSuccess: (d) => putDeal(qc, d),
+    onError,
+  });
+}
+
+export function useUpdateActivity() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "updateActivity"],
+    mutationFn: ({ activityId, attendeeIds }: { activityId: string; attendeeIds: string[] }) => api.updateActivity(activityId, { attendeeIds }),
+    onSuccess: (d) => { putDeal(qc, d); toast("Saved who was on it."); },
+    onError,
+  });
+}
+
+export function useSetCallType() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "setCallType"],
+    mutationFn: ({ dealId, callType }: { dealId: string; callType: CallType }) => api.setCallType(dealId, callType),
+    onSuccess: (r) => { applyResult(qc, r); toast(`Next call set.${tasksNote(r.tasksCreated.length)}`); },
+    onError,
+  });
+}
+
+export function useTransferDeal() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "transferDeal"],
+    mutationFn: ({ deal, pipelineId }: { deal: Deal; pipelineId: string }) => api.transferDeal(deal.id, pipelineId).then((r) => ({ r, from: deal.pipelineId })),
+    onSuccess: ({ r, from }) => {
+      qc.setQueryData<Deal[]>(qk.deals(from), (old = []) => old.filter((d) => d.id !== r.deal.id));
+      qc.setQueryData<Task[]>(qk.tasks(from), (old = []) => old.filter((t) => t.dealId !== r.deal.id));
+      void qc.invalidateQueries({ queryKey: qk.deals(r.deal.pipelineId) });
+      void qc.invalidateQueries({ queryKey: qk.tasks(r.deal.pipelineId) });
+      void qc.invalidateQueries({ queryKey: qk.pipelines() });
+    },
+    onError,
+  });
+}
+
+export function useAddTouchpoint() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "addTouchpoint"],
+    mutationFn: ({ dealId, input }: { dealId: string; input: AddTouchpointInput }) => api.addTouchpoint(dealId, input),
+    onSuccess: (d) => { putDeal(qc, d); toast("Step added to the journey."); },
     onError,
   });
 }
@@ -238,7 +332,7 @@ export function useCreatePipeline() {
   const qc = useQueryClient();
   return useMutation({
     mutationKey: [...qk.all, "createPipeline"],
-    mutationFn: (name: string) => api.createPipeline(name),
+    mutationFn: ({ name, template }: { name: string; template?: PipelineTemplate }) => api.createPipeline(name, template),
     onSuccess: (p) => { qc.setQueryData<Pipeline[]>(qk.pipelines(), (old = []) => [...old, p]); toast(`${p.name} pipeline created.`); },
     onError,
   });
@@ -303,6 +397,138 @@ export function useUpdateSettings() {
   });
 }
 
+/* ---------- People ---------- */
+
+export const usersKey = () => [...qk.all, "users"] as const;
+
+export function useInviteUser() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "inviteUser"],
+    mutationFn: (input: InviteInput) => {
+      if (!api.inviteUser) throw new ApiError("Invites need the server.", 400, "not_supported");
+      return api.inviteUser(input);
+    },
+    onSuccess: (u) => {
+      void qc.invalidateQueries({ queryKey: usersKey() });
+      void qc.invalidateQueries({ queryKey: qk.settings() });
+      toast(u.pending
+        ? (u.emailSent ? `Invite sent to ${u.email}.` : `${u.name} added. The email couldn't be sent: check the email settings, then use Resend.`)
+        : `${u.name} already had a login and now has pipeline access.`);
+    },
+    onError,
+  });
+}
+
+export function useResendInvite() {
+  const { api } = useModule();
+  return useMutation({
+    mutationKey: [...qk.all, "resendInvite"],
+    mutationFn: (userId: string) => {
+      if (!api.resendInvite) throw new ApiError("Invites need the server.", 400, "not_supported");
+      return api.resendInvite(userId);
+    },
+    onSuccess: (u) => toast(u.emailSent ? `Invite sent again to ${u.email}.` : "The email couldn't be sent. Check the email settings on the server."),
+    onError,
+  });
+}
+
+/* ---------- Intake keys (game / analysis / audit tools) ---------- */
+
+export const intakeKeysKey = () => [...qk.all, "intake-keys"] as const;
+
+export function useIntakeKeys(enabled: boolean) {
+  const { api } = useModule();
+  return useQuery({ queryKey: intakeKeysKey(), queryFn: () => api.listIntakeKeys?.() ?? Promise.resolve([]), enabled: enabled && !!api.listIntakeKeys });
+}
+
+export function useCreateIntakeKey() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "createIntakeKey"],
+    mutationFn: (name: string) => {
+      if (!api.createIntakeKey) throw new ApiError("Intake keys need the server.", 400, "not_supported");
+      return api.createIntakeKey(name);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: intakeKeysKey() }),
+    onError,
+  });
+}
+
+export function useRevokeIntakeKey() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "revokeIntakeKey"],
+    mutationFn: (id: string) => {
+      if (!api.revokeIntakeKey) throw new ApiError("Intake keys need the server.", 400, "not_supported");
+      return api.revokeIntakeKey(id);
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: intakeKeysKey() }); toast("Key revoked. The tool using it can no longer send leads."); },
+    onError,
+  });
+}
+
+/* ---------- Google Calendar and recorded calls (server only) ---------- */
+
+export const recordingsKey = () => [...qk.all, "recordings"] as const;
+
+export function useSyncCalendar() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "syncCalendar"],
+    mutationFn: (dealId: string) => {
+      if (!api.syncCalendar) throw new ApiError("The calendar needs the server.", 400, "not_supported");
+      return api.syncCalendar(dealId);
+    },
+    onSuccess: ({ result, deal }) => {
+      putDeal(qc, deal);
+      toast(result === "deleted" ? "Removed from the team calendar." : result === "none" ? "Nothing to put on the calendar: set a demo date first." : "On the team calendar.");
+    },
+    onError,
+  });
+}
+
+export function useRecordings(enabled: boolean) {
+  const { api } = useModule();
+  return useQuery({ queryKey: recordingsKey(), queryFn: () => api.listRecordings?.() ?? Promise.resolve([]), enabled: enabled && !!api.listRecordings, refetchInterval: POLL_MS * 2 });
+}
+
+export function useLinkRecording() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "linkRecording"],
+    mutationFn: ({ id, dealId }: { id: string; dealId: string }) => {
+      if (!api.linkRecording) throw new ApiError("Recorded calls need the server.", 400, "not_supported");
+      return api.linkRecording(id, dealId);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: recordingsKey() });
+      void qc.invalidateQueries({ queryKey: qk.all });
+      toast("Call logged on the deal. The AI summary follows in a minute.");
+    },
+    onError,
+  });
+}
+
+export function useDismissRecording() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "dismissRecording"],
+    mutationFn: (id: string) => {
+      if (!api.dismissRecording) throw new ApiError("Recorded calls need the server.", 400, "not_supported");
+      return api.dismissRecording(id);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: recordingsKey() }),
+    onError,
+  });
+}
+
 /* ---------- Bulk ---------- */
 
 function invalidatePipeline(qc: QueryClient, pid: string) {
@@ -318,6 +544,20 @@ export function useImportLeads() {
     mutationKey: [...qk.all, "import"],
     mutationFn: ({ pipelineId, rows }: { pipelineId: string; rows: ImportRow[] }) => api.importLeads(pipelineId, rows).then((r) => ({ ...r, pipelineId })),
     onSuccess: (r) => { invalidatePipeline(qc, r.pipelineId); toast(`Imported ${r.created} ${r.created === 1 ? "lead" : "leads"}.`); },
+    onError,
+  });
+}
+
+export function useImportHandoffs() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "importHandoffs"],
+    mutationFn: (pid: string) => api.importHandoffs(pid).then((r) => ({ ...r, pid })),
+    onSuccess: (r) => {
+      void qc.invalidateQueries({ queryKey: qk.all });
+      toast(r.moved ? `${r.moved} partner hand-off${r.moved === 1 ? "" : "s"} moved in.` : "No partner hand-offs waiting for this pipeline.");
+    },
     onError,
   });
 }

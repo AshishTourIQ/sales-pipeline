@@ -2,11 +2,34 @@
 Wire format = the frontend's TypeScript types (types.ts) in snake_case.
 Output serializers shape the response; input serializers validate requests.
 """
+from datetime import datetime
+
 from rest_framework import serializers
 
-from ..config import ACTIVITY_TYPES, INTERESTS, LOSS_REASONS, PAY_STATUS
+from ..config import ACTIVITY_TYPES, BOOTH_SOURCES, INTERESTS, LOSS_REASONS, OFFERS, PAY_STATUS, VISITOR_TYPES
 from ..models import Deal, Pipeline, Task
 from ..services import stages as stage_list
+from ..config import CALL_TYPES, CATEGORIES, TEMPLATES, TRACKS
+from ..models import Touchpoint
+from ..services.booth import booth_out
+from ..services.intake import EVENTS
+from ..services.touchpoints import touchpoint_out
+
+
+class DemoDateField(serializers.CharField):
+    """"YYYY-MM-DDTHH:mm" (or just the date), or "". Checked here so the calendar job never meets a bad one."""
+
+    def __init__(self, **kw):
+        super().__init__(max_length=16, allow_blank=True, **kw)
+
+    def to_internal_value(self, data):
+        v = super().to_internal_value(data)
+        if v:
+            try:
+                datetime.fromisoformat(v)
+            except ValueError:
+                raise serializers.ValidationError("Use a date and time like 2026-10-14T10:30.")
+        return v
 
 STAGE_KEY = {"max_length": 16}
 
@@ -41,7 +64,7 @@ def deal_out(d: Deal) -> dict:
         "pipeline_id": str(d.pipeline_id),
         "company": {
             "name": c.name, "website": c.website, "region": c.region, "segment": c.segment, "platform": c.platform,
-            "products5": c.products5, "sells_out": c.sells_out, "reachable": c.reachable,
+            "products5": c.products5, "sells_out": c.sells_out, "reachable": c.reachable, "category": c.category,
         },
         "contact": {
             "name": ct.name if ct else "", "title": ct.title if ct else "", "email": ct.email if ct else "",
@@ -49,6 +72,7 @@ def deal_out(d: Deal) -> dict:
             "decision_maker": ct.decision_maker if ct else False,
         },
         "source": d.source,
+        "event": d.event,
         "interest": d.interest,
         "owner_id": _s(d.owner_id),
         "fit": float(d.fit),
@@ -60,7 +84,8 @@ def deal_out(d: Deal) -> dict:
             for h in d.history.all()
         ],
         "activities": [
-            {"id": str(a.id), "type": a.type, "text": a.text, "at": _d(a.at), "by_id": _s(a.by_id) or None, "by_name": a.by_name}
+            {"id": str(a.id), "type": a.type, "text": a.text, "at": _d(a.at), "by_id": _s(a.by_id) or None, "by_name": a.by_name,
+             "attendee_ids": list(a.attendees or [])}
             for a in d.activities.all()
         ],
         "snapshot_sent": d.snapshot_sent,
@@ -78,7 +103,20 @@ def deal_out(d: Deal) -> dict:
         "onboarding": d.onboarding or {},
         "signed_at": _d(d.signed_at),
         "live_at": _d(d.live_at),
+        "first_touch_at": _d(d.first_touch_at),
+        "demo_at": _d(d.demo_at),
         "sample": d.is_sample,
+        "met_by_id": _s(d.met_by_id),
+        "booth": booth_out(d.booth),
+        "track": d.track,
+        "call_type": d.call_type,
+        "account_manager_id": _s(d.account_manager_id),
+        "links": d.links or [],
+        "commission_pct": float(d.commission_pct) if d.commission_pct is not None else None,
+        "commission_in_pct": float(d.commission_in_pct) if d.commission_in_pct is not None else None,
+        "meeting_url": d.meeting_url,
+        "on_calendar": bool(d.calendar_event_id),
+        "touchpoints": [touchpoint_out(t) for t in d.touchpoints.all()],
     }
 
 
@@ -99,7 +137,7 @@ def template_out(t) -> dict:
 
 
 def deal_queryset(qs):
-    return qs.select_related("company", "contact").prefetch_related("history", "activities")
+    return qs.select_related("company", "contact").prefetch_related("history", "activities", "touchpoints")
 
 
 def result_out_or_none(r) -> dict | None:
@@ -108,7 +146,8 @@ def result_out_or_none(r) -> dict | None:
 
 def result_out(r) -> dict:
     deal = deal_queryset(Deal.objects.filter(id=r.deal.id)).get()
-    return {"deal": deal_out(deal), "tasks_created": [task_out(t) for t in r.tasks_created], "tasks_closed": r.tasks_closed}
+    return {"deal": deal_out(deal), "tasks_created": [task_out(t) for t in r.tasks_created], "tasks_closed": r.tasks_closed,
+            "notices": list(getattr(r, "notices", []) or [])}
 
 
 # ---------------- input ----------------
@@ -122,6 +161,7 @@ class CompanyIn(serializers.Serializer):
     products5 = serializers.BooleanField(required=False)
     sells_out = serializers.BooleanField(required=False)
     reachable = serializers.BooleanField(required=False)
+    category = serializers.ChoiceField(choices=[*CATEGORIES, ""], required=False)
 
 
 class ContactIn(serializers.Serializer):
@@ -142,7 +182,8 @@ class DealCreateIn(serializers.Serializer):
     interest = serializers.ChoiceField(choices=[*INTERESTS, ""], required=False, default="")
     owner_id = serializers.CharField(allow_blank=True, required=False, default="")
     note = serializers.CharField(allow_blank=True, required=False, default="")
-    demo_date = serializers.CharField(max_length=16, allow_blank=True, required=False, default="")
+    demo_date = DemoDateField(required=False, default="")
+    event = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
 
 
 class PaymentIn(serializers.Serializer):
@@ -153,22 +194,72 @@ class PaymentIn(serializers.Serializer):
     invoiced_at = serializers.CharField(max_length=10, allow_blank=True, required=False)
 
 
+class BoothPatchIn(serializers.Serializer):
+    visitor = serializers.ChoiceField(choices=list(VISITOR_TYPES), required=False)
+    answers = serializers.DictField(child=serializers.CharField(max_length=40), required=False)
+    offer = serializers.ChoiceField(choices=[*OFFERS, ""], required=False)
+    game_played = serializers.BooleanField(required=False)
+    game_score = serializers.CharField(max_length=20, allow_blank=True, required=False)
+    destination = serializers.CharField(max_length=200, allow_blank=True, required=False)
+    runs = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    pricing_tool = serializers.CharField(max_length=200, allow_blank=True, required=False)
+
+
+class BoothContactIn(serializers.Serializer):
+    name = serializers.CharField(max_length=200, allow_blank=True, required=False, default="")
+    email = serializers.EmailField(allow_blank=True, required=False, default="")
+    phone = serializers.CharField(max_length=60, allow_blank=True, required=False, default="")
+
+
+class BoothLeadIn(BoothPatchIn):
+    """The booth sheet. Points and tier are never sent: the server scores the answers."""
+
+    pipeline_id = serializers.UUIDField()
+    client_id = serializers.CharField(max_length=64, allow_blank=True, required=False, default="")
+    source = serializers.ChoiceField(choices=sorted(BOOTH_SOURCES), required=False, default="Arival booth")
+    met_at = serializers.CharField(max_length=16, allow_blank=True, required=False, default="")
+    event = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
+    met_by_id = serializers.CharField(allow_blank=True, required=False, default="")
+    company = serializers.CharField(max_length=200)
+    contact = BoothContactIn(required=False, default=dict)
+    visitor = serializers.ChoiceField(choices=list(VISITOR_TYPES))
+    booked_at = serializers.CharField(max_length=16, allow_blank=True, required=False, default="")
+    followup_owner_id = serializers.CharField(allow_blank=True, required=False, default="")
+    followup_due = serializers.DateField(required=False, allow_null=True, default=None)
+    note = serializers.CharField(max_length=5000, allow_blank=True, required=False, default="")
+    # Comparative analysis (tier C): their website (the analysis finds their competitors itself)
+    website = serializers.CharField(max_length=300, allow_blank=True, required=False, default="")
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and data.get("followup_due") == "":
+            data = {**data, "followup_due": None}
+        return super().to_internal_value(data)
+
+
 class DealPatchIn(serializers.Serializer):
     company = CompanyIn(required=False)
     contact = ContactIn(required=False)
     source = serializers.CharField(max_length=80, allow_blank=True, required=False)
+    event = serializers.CharField(max_length=120, allow_blank=True, required=False)
     interest = serializers.ChoiceField(choices=[*INTERESTS, ""], required=False)
     owner_id = serializers.CharField(allow_blank=True, required=False)
     package = serializers.CharField(max_length=120, allow_blank=True, required=False)
     value = serializers.CharField(max_length=60, allow_blank=True, required=False)
     locations = serializers.CharField(max_length=60, allow_blank=True, required=False)
     snapshot_sent = serializers.BooleanField(required=False)
-    demo_date = serializers.CharField(max_length=16, allow_blank=True, required=False)
+    demo_date = DemoDateField(required=False)
     reengage_date = serializers.DateField(required=False, allow_null=True)
     payment = PaymentIn(required=False)
     qual = serializers.DictField(child=serializers.BooleanField(), required=False)
     pilot_checks = serializers.DictField(child=serializers.BooleanField(), required=False)
     onboarding = serializers.DictField(child=serializers.BooleanField(), required=False)
+    met_by_id = serializers.CharField(allow_blank=True, required=False)
+    booth = BoothPatchIn(required=False)
+    account_manager_id = serializers.CharField(allow_blank=True, required=False)
+    meeting_url = serializers.CharField(max_length=500, allow_blank=True, required=False)
+    links = serializers.ListField(child=serializers.DictField(), required=False, max_length=20)
+    commission_pct = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=0, max_value=100, required=False, allow_null=True)
+    commission_in_pct = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=0, max_value=100, required=False, allow_null=True)
 
     def to_internal_value(self, data):
         if isinstance(data, dict) and data.get("reengage_date") == "":
@@ -182,11 +273,15 @@ class MoveIn(serializers.Serializer):
     loss_competitor = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
     nurture_reason = serializers.CharField(max_length=80, allow_blank=True, required=False, default="")
     reengage_date = serializers.DateField(required=False, allow_null=True)
-    demo_date = serializers.CharField(max_length=16, allow_blank=True, required=False, default="")
+    demo_date = DemoDateField(required=False, default="")
     note = serializers.CharField(allow_blank=True, required=False, default="")
     # Admin override: move forward although the stage still has open tasks
     force = serializers.BooleanField(required=False, default=False)
     override_reason = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    # Moving into "Offer sent": which offer (game, analysis, audit)
+    track = serializers.ChoiceField(choices=[*TRACKS, ""], required=False, default="")
+    # Moving into the second call (s9): a team demo or the commercial call
+    call_type = serializers.ChoiceField(choices=[*CALL_TYPES, ""], required=False, default="")
 
 
 class StageTaskIn(serializers.Serializer):
@@ -200,6 +295,21 @@ class StageTaskIn(serializers.Serializer):
 class ActivityIn(serializers.Serializer):
     type = serializers.ChoiceField(choices=ACTIVITY_TYPES)
     text = serializers.CharField(max_length=20000)
+    # Calls and meetings: team members who were on it
+    attendee_ids = serializers.ListField(child=serializers.CharField(max_length=64), required=False, default=list, max_length=30)
+
+
+class ActivityPatchIn(serializers.Serializer):
+    attendee_ids = serializers.ListField(child=serializers.CharField(max_length=64), required=False, max_length=30)
+
+
+class CallTypeIn(serializers.Serializer):
+    call_type = serializers.ChoiceField(choices=list(CALL_TYPES))
+
+
+class TransferIn(serializers.Serializer):
+    pipeline_id = serializers.UUIDField()
+    stage = serializers.CharField(max_length=16, allow_blank=True, required=False, default="")
 
 
 class TaskCreateIn(serializers.Serializer):
@@ -225,6 +335,8 @@ class TaskPatchIn(TaskCreateIn):
 
 class PipelineIn(serializers.Serializer):
     name = serializers.CharField(max_length=120, required=False)
+    # Only when creating: which stage template it starts from
+    template = serializers.ChoiceField(choices=list(TEMPLATES), required=False, default="touriq")
     pilot_enabled = serializers.BooleanField(required=False)
     stages = serializers.JSONField(required=False)
 
@@ -246,6 +358,67 @@ class SettingsIn(serializers.Serializer):
     team = serializers.ListField(child=serializers.DictField(), required=False)
     rules = serializers.DictField(child=serializers.BooleanField(), required=False)
     targets = serializers.DictField(required=False)
+    booth_followup = serializers.DictField(child=serializers.DictField(), required=False)
+    links = serializers.DictField(child=serializers.CharField(max_length=600, allow_blank=True), required=False)
+    # {"Arival 2026": 12000}; null or blank removes an event's cost
+    event_costs = serializers.DictField(child=serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0, allow_null=True),
+                                        required=False)
+
+
+class TouchpointIn(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=[k for k, _ in Touchpoint.KINDS])
+    score = serializers.CharField(max_length=40, allow_blank=True, required=False, default="")
+    link = serializers.URLField(max_length=600, allow_blank=True, required=False, default="")
+    detail = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+
+
+class IntakeContactIn(serializers.Serializer):
+    name = serializers.CharField(max_length=200, allow_blank=True, required=False, default="")
+    email = serializers.EmailField(allow_blank=True, required=False, default="")
+    phone = serializers.CharField(max_length=60, allow_blank=True, required=False, default="")
+    title = serializers.CharField(max_length=200, allow_blank=True, required=False, default="")
+
+
+class IntakeCompanyIn(serializers.Serializer):
+    name = serializers.CharField(max_length=200, allow_blank=True, required=False, default="")
+    website = serializers.CharField(max_length=300, allow_blank=True, required=False, default="")
+
+
+class IntakeIn(serializers.Serializer):
+    """One event from the game, comparative analysis or audit tool (see docs/INTAKE_API.md)."""
+
+    event = serializers.ChoiceField(choices=list(EVENTS))
+    event_id = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
+    pipeline_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    occurred_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    contact = IntakeContactIn(required=False, default=dict)
+    company = IntakeCompanyIn(required=False, default=dict)
+    score = serializers.CharField(max_length=40, allow_blank=True, required=False, default="")
+    link = serializers.URLField(max_length=600, allow_blank=True, required=False, default="")
+    detail = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    # New leads only: the trade show where the tool was used ("Arival 2026").
+    # Not "event": that is the tool event kind above.
+    trade_show = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
+
+    def validate(self, attrs):
+        if not (attrs["contact"].get("email") or attrs["company"].get("name")):
+            raise serializers.ValidationError({"detail": "Send contact.email or company.name so the lead can be matched."})
+        return attrs
+
+
+class RecordingLinkIn(serializers.Serializer):
+    deal_id = serializers.UUIDField()
+
+
+class IntakeKeyIn(serializers.Serializer):
+    name = serializers.CharField(max_length=80)
+
+
+class InviteIn(serializers.Serializer):
+    name = serializers.CharField(max_length=200)
+    email = serializers.EmailField()
+    role = serializers.ChoiceField(choices=["viewer", "contributor", "admin"], default="contributor")
+    sales_team = serializers.BooleanField(default=True)
 
 
 class ImportRowIn(serializers.Serializer):
@@ -269,6 +442,8 @@ class ImportRowIn(serializers.Serializer):
     demo = serializers.CharField(max_length=10, allow_blank=True, required=False, default="")
     notes = serializers.CharField(allow_blank=True, required=False, default="")
     fu = serializers.CharField(max_length=10, allow_blank=True, required=False, default="")
+    # Company type as written in the sheet ("OTA", "Booking platform", "Competitor", ...)
+    category = serializers.CharField(max_length=60, allow_blank=True, required=False, default="")
 
 
 class ImportIn(serializers.Serializer):
@@ -276,6 +451,6 @@ class ImportIn(serializers.Serializer):
 
 
 class AiDraftIn(serializers.Serializer):
-    action = serializers.ChoiceField(choices=["brief", "first", "follow", "tag", "summary", "next"])
+    action = serializers.ChoiceField(choices=["brief", "first", "follow", "invite", "tag", "summary", "next"])
     option = serializers.CharField(max_length=10, allow_blank=True, required=False, default="")
     pasted = serializers.CharField(max_length=30000, allow_blank=True, required=False, default="")

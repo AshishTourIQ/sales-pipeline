@@ -10,6 +10,8 @@ export type Layout = "board" | "list";
 export interface BoardFilters {
   ownerId: string;
   source: string;
+  /** Booth tier ("A".."D"), or "" for all */
+  tier: string;
   q: string;
   flagged: boolean;
 }
@@ -23,6 +25,8 @@ interface Persisted {
   pipelineId: string;
   meId: string;
   lastSource: string;
+  /** The booth form's event, remembered on this device */
+  lastEvent: string;
 }
 
 const DEFAULTS: Persisted = {
@@ -32,6 +36,7 @@ const DEFAULTS: Persisted = {
   pipelineId: "touriq",
   meId: "",
   lastSource: "Arival booth",
+  lastEvent: "Arival 2026",
 };
 const KEY = "sales-pipeline.ui.v1";
 
@@ -53,6 +58,7 @@ interface UiValue extends Persisted {
   setPipelineId: (id: string) => void;
   setMeId: (id: string) => void;
   setLastSource: (s: string) => void;
+  setLastEvent: (e: string) => void;
 
   filters: BoardFilters;
   setFilters: (f: Partial<BoardFilters>) => void;
@@ -75,6 +81,11 @@ interface UiValue extends Persisted {
   capture: { open: boolean; stage?: StageKey };
   openCapture: (stage?: StageKey) => void;
   closeCapture: () => void;
+
+  /** The booth lead form (the Arival sheet). */
+  boothOpen: boolean;
+  openBooth: () => void;
+  closeBooth: () => void;
 }
 
 const Ctx = createContext<UiValue | null>(null);
@@ -92,18 +103,25 @@ export function UiProvider({ children, initialMeId }: { children: ReactNode; ini
     try { window.localStorage.setItem(KEY, JSON.stringify(p)); } catch { /* storage unavailable */ }
   }, [p, hydrated]);
 
-  const [filters, setF] = useState<BoardFilters>({ ownerId: "", source: "", q: "", flagged: false });
+  const [filters, setF] = useState<BoardFilters>({ ownerId: "", source: "", tier: "", q: "", flagged: false });
   const [taskOwnerId, setTaskOwnerId] = useState<string>("");
   useEffect(() => { if (hydrated) setTaskOwnerId(p.meId); }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Deep link from alert emails: ?deal=<id> opens that deal on the board
+  const [boothOpen, setBoothOpen] = useState(false);
+  // Deep links: ?deal=<id> (alert emails) opens that deal on the board;
+  // ?booth=1 (saved on booth staff's phones) opens the booth lead form
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get("deal");
-    if (!id) return;
-    setP((x) => ({ ...x, view: "board" }));
-    setOpenDealId(id);
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("deal");
+    if (id) {
+      setP((x) => ({ ...x, view: "board" }));
+      setOpenDealId(id);
+    }
+    if (params.get("booth")) setBoothOpen(true);
+    if (!id && !params.has("booth")) return;
     const url = new URL(window.location.href);
     url.searchParams.delete("deal");
+    url.searchParams.delete("booth");
     window.history.replaceState(null, "", url.toString());
   }, []);
   const [mobileStage, setMS] = useState<Partial<Record<string, StageKey>>>({});
@@ -116,7 +134,7 @@ export function UiProvider({ children, initialMeId }: { children: ReactNode; ini
   const setSub = useCallback((sub: string) => setP((x) => ({ ...x, sub: { ...x.sub, [x.view]: sub } })), []);
   const setPipelineId = useCallback((pipelineId: string) => {
     setP((x) => ({ ...x, pipelineId, view: x.view === "settings" ? "board" : x.view }));
-    setF({ ownerId: "", source: "", q: "", flagged: false });
+    setF({ ownerId: "", source: "", tier: "", q: "", flagged: false });
     setOpenDealId(null);
   }, []);
 
@@ -128,6 +146,7 @@ export function UiProvider({ children, initialMeId }: { children: ReactNode; ini
     setPipelineId,
     setMeId: (meId) => { setP((x) => ({ ...x, meId })); setTaskOwnerId(meId); },
     setLastSource: (lastSource) => setP((x) => ({ ...x, lastSource })),
+    setLastEvent: (lastEvent) => setP((x) => ({ ...x, lastEvent })),
     filters,
     setFilters: (f) => setF((x) => ({ ...x, ...f })),
     taskOwnerId,
@@ -145,7 +164,10 @@ export function UiProvider({ children, initialMeId }: { children: ReactNode; ini
     capture,
     openCapture: (stage) => setCapture({ open: true, stage }),
     closeCapture: () => setCapture({ open: false }),
-  }), [p, setView, setSub, setPipelineId, filters, taskOwnerId, mobileStage, openDealId, drawerTab, moveRequest, capture]);
+    boothOpen,
+    openBooth: () => setBoothOpen(true),
+    closeBooth: () => setBoothOpen(false),
+  }), [p, setView, setSub, setPipelineId, filters, taskOwnerId, mobileStage, openDealId, drawerTab, moveRequest, capture, boothOpen]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

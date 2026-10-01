@@ -28,7 +28,9 @@ const toSnake = (s: string) => s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
 const toCamel = (s: string) => s.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 
 /** Keys whose object values are maps keyed by data (stage keys, rule keys, checklist keys), not field names. */
-const OPAQUE_KEYS = new Set(["stages", "rules", "targets", "qual", "pilotChecks", "onboarding", "pilot_checks"]);
+const OPAQUE_KEYS = new Set([
+  "stages", "rules", "targets", "qual", "pilotChecks", "onboarding", "pilot_checks", "answers", "boothFollowup", "booth_followup", "eventCosts", "event_costs",
+]);
 
 function convertKeys(v: unknown, fn: (s: string) => string, opaque = false): unknown {
   if (Array.isArray(v)) return v.map((x) => convertKeys(x, fn));
@@ -87,29 +89,46 @@ export function createDrfApi(opts: DrfApiOptions): PipelineApi {
     return camel<T>(data);
   }
 
-  /** DRF list endpoints may be paginated ({results}) or plain arrays. */
+  /**
+   * List endpoints return plain arrays, or pages ({results, nextOffset}) for deals and tasks:
+   * follow the pages until the last one.
+   */
   async function list<T>(path: string): Promise<T[]> {
-    const data = await req<T[] | { results: T[] }>("GET", path);
-    return Array.isArray(data) ? data : data.results;
+    const out: T[] = [];
+    let offset: number | null = 0;
+    for (let guard = 0; offset != null && guard < 200; guard++) {
+      const sep = path.includes("?") ? "&" : "?";
+      const data: T[] | { results: T[]; nextOffset?: number | null } = await req("GET", offset ? `${path}${sep}offset=${offset}` : path);
+      if (Array.isArray(data)) return data;
+      out.push(...data.results);
+      offset = data.nextOffset ?? null;
+    }
+    return out;
   }
 
   const q = encodeURIComponent;
   return {
     listPipelines: () => list("/pipelines/"),
-    createPipeline: (name) => req("POST", "/pipelines/", { name }),
+    createPipeline: (name, template = "touriq") => req("POST", "/pipelines/", { name, template }),
+    importHandoffs: (pipelineId) => req("POST", `/pipelines/${q(pipelineId)}/handoffs/`, {}),
     updatePipeline: (id, patch) => req("PATCH", `/pipelines/${q(id)}/`, patch),
     addStage: (pipelineId, input) => req("POST", `/pipelines/${q(pipelineId)}/stages/`, input),
     removeStage: (pipelineId, stageKey, moveTo) => req("POST", `/pipelines/${q(pipelineId)}/stages/${q(stageKey)}/remove/`, { moveTo }),
 
-    listDeals: (pipelineId) => list(`/deals/?pipeline=${q(pipelineId)}&page_size=5000`),
+    listDeals: (pipelineId) => list(`/deals/?pipeline=${q(pipelineId)}&limit=1000`),
     createDeal: (input) => req("POST", "/deals/", input),
+    createBoothLead: (input) => req("POST", "/deals/booth/", input),
     updateDeal: (id, patch) => req("PATCH", `/deals/${q(id)}/`, patch),
     moveDeal: (id, input) => req("POST", `/deals/${q(id)}/move/`, input),
     deleteDeal: (id) => req("DELETE", `/deals/${q(id)}/`),
-    addActivity: (dealId, type, text) => req("POST", `/deals/${q(dealId)}/activities/`, { type, text }),
+    addActivity: (dealId, type, text, attendeeIds = []) => req("POST", `/deals/${q(dealId)}/activities/`, { type, text, attendeeIds }),
+    updateActivity: (activityId, patch) => req("PATCH", `/activities/${q(activityId)}/`, patch),
+    setCallType: (dealId, callType) => req("POST", `/deals/${q(dealId)}/call-type/`, { callType }),
+    transferDeal: (dealId, pipelineId) => req("POST", `/deals/${q(dealId)}/transfer/`, { pipelineId }),
+    addTouchpoint: (dealId, input) => req("POST", `/deals/${q(dealId)}/touchpoints/`, input),
     createExpansion: (dealId) => req("POST", `/deals/${q(dealId)}/expansion/`, {}),
 
-    listTasks: (pipelineId) => list(`/tasks/?pipeline=${q(pipelineId)}&page_size=5000`),
+    listTasks: (pipelineId) => list(`/tasks/?pipeline=${q(pipelineId)}&limit=1000`),
     createTask: (input) => req("POST", "/tasks/", input),
     updateTask: (id, patch) => req("PATCH", `/tasks/${q(id)}/`, patch),
     deleteTask: (id) => req("DELETE", `/tasks/${q(id)}/`),
@@ -119,6 +138,17 @@ export function createDrfApi(opts: DrfApiOptions): PipelineApi {
     deleteStageTask: (id) => req("DELETE", `/stage-tasks/${q(id)}/`),
 
     listUsers: () => list("/users/"),
+    inviteUser: (input) => req("POST", "/users/", input),
+    resendInvite: (userId) => req("POST", `/users/${q(userId)}/resend-invite/`, {}),
+    listIntakeKeys: () => list("/intake-keys/"),
+    createIntakeKey: (name) => req("POST", "/intake-keys/", { name }),
+    revokeIntakeKey: (id) => req("DELETE", `/intake-keys/${q(id)}/`),
+    syncCalendar: (dealId) => req("POST", `/deals/${q(dealId)}/calendar-sync/`, {}),
+    listRecordings: () => list("/recordings/?status=unmatched,failed"),
+    linkRecording: (id, dealId) => req("POST", `/recordings/${q(id)}/link/`, { dealId }),
+    dismissRecording: (id) => req("POST", `/recordings/${q(id)}/dismiss/`, {}),
+    findDuplicates: ({ company = "", email = "", website = "" }) =>
+      list(`/deals/duplicates/?company=${q(company)}&email=${q(email)}&website=${q(website)}`),
     getSettings: () => req("GET", "/settings/"),
     updateSettings: (patch) => req("PATCH", "/settings/", patch),
 

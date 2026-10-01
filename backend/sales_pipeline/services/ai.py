@@ -15,11 +15,13 @@ import anthropic
 from django.conf import settings
 from pydantic import BaseModel, ValidationError
 
+from ..config import CALL_TYPES, CATEGORIES, LINK_KEYS, OFFERS, VISITOR_TYPES
 from ..models import Deal, Task
+from .booth import booth_out
 from .errors import ServiceError
 from .flags import days_in_stage
 from . import stages as stage_list
-from .pipelines import stage_def
+from .pipelines import get_settings, stage_def
 
 log = logging.getLogger(__name__)
 
@@ -85,29 +87,116 @@ class DraftResult:
 
 def deal_context(deal: Deal) -> str:
     c, ct = deal.company, deal.contact
+    op = audience(deal) == "operator"  # operator-only facts stay out of partner drafts
     lines = [
         f"Company: {c.name or 'unknown'}",
         c.website and f"Website: {c.website}",
         c.region and f"Region: {c.region}",
         c.segment and f"Segment: {c.segment}",
         c.platform and f"Booking platform: {c.platform}",
-        f"5+ products or many departures: {'yes' if c.products5 else 'unknown'}",
-        f"Sells out often: {'yes' if c.sells_out else 'unknown'}",
+        op and f"5+ products or many departures: {'yes' if c.products5 else 'unknown'}",
+        op and f"Sells out often: {'yes' if c.sells_out else 'unknown'}",
         "Contact: " + (", ".join(x for x in [getattr(ct, 'name', ''), getattr(ct, 'title', '')] if x) or "unknown"),
         f"Lead source: {deal.source or 'unknown'}",
         deal.interest and f"Interest level: {deal.interest}",
+        c.category and f"Company type: {CATEGORIES.get(c.category, c.category)}",
+        _booth_line(deal),
+        deal.call_type and f"Next call: {CALL_TYPES.get(deal.call_type, deal.call_type)}",
         f"Pipeline stage: {stage_def(deal.pipeline, deal.stage).name}",
-        f"Pricing Snapshot: {'sent' if deal.snapshot_sent else 'not sent yet'}",
+        op and f"Pricing Snapshot: {'sent' if deal.snapshot_sent else 'not sent yet'}",
     ]
     notes = list(deal.activities.order_by("-at")[:8])[::-1]
     text = "\n".join(x for x in lines if x)
+    links = _links(deal)
+    if links:
+        text += ("\nLinks you may use (write them out in full; use the booking link wherever a draft says [booking link]):\n"
+                 + "\n".join(f"- {label}: {url}" for label, url in links))
     if notes:
         text += "\nRecent notes:\n" + "\n".join(f"- [{a.type}, {a.at:%d %b}] {a.text[:900]}" for a in notes)
     return text
 
 
+def _links(deal: Deal) -> list[tuple[str, str]]:
+    """Workspace links (booking link, demo deck, samples), this deal's files, and report links from its journey."""
+    ws = get_settings(deal.tenant_id).links or {}
+    out = [(LINK_KEYS[k], ws[k]) for k in LINK_KEYS if ws.get(k)]
+    out += [(f"Their file: {x.get('label') or 'link'}", x["url"]) for x in (deal.links or []) if x.get("url")]
+    out += [(f"Their {t.get_kind_display().lower()}", t.link) for t in deal.touchpoints.exclude(link="")[:5]]
+    return out
+
+
+def is_do_not_contact(deal: Deal) -> bool:
+    """Unsubscribed contacts and competitors are never emailed."""
+    return bool((deal.contact_id and deal.contact.opted_out) or deal.company.category == "competitor")
+
+
+def _booth_line(deal: Deal) -> str:
+    b = booth_out(deal.booth)
+    if not b:
+        return ""
+    bits = [f"Met at the booth ({VISITOR_TYPES.get(b['visitor'], b['visitor'])})"]
+    if b["tier"]:
+        bits.append(f"lead tier {b['tier']} of A-D")
+    if b["offer"]:
+        bits.append(f"offered: {OFFERS.get(b['offer'], b['offer'])}")
+    if b["runs"]:
+        bits.append(f"runs: {b['runs']}")
+    if b["pricing_tool"]:
+        bits.append(f"pricing tool: {b['pricing_tool']}")
+    return "; ".join(bits)
+
+
+# Drafts meant to be sent to the prospect
+OUTREACH_ACTIONS = {"first", "follow", "invite"}
+
+
+def audience(deal: Deal) -> str:
+    """Who the draft is for: operator (paying client), platform, channel (OTA), referral (revenue manager), agency."""
+    cat = deal.company.category
+    by_cat = {"booking_platform": "platform", "ota": "channel", "revenue_manager": "referral", "agency": "agency"}
+    if cat in by_cat:
+        return by_cat[cat]
+    return {"partners": "platform", "channels": "channel"}.get(deal.pipeline.template, "referral" if deal.pipeline.template == "referrals" else "operator")
+
+
+# First message / brief goals for the partners (operators use the Pricing Snapshot prompts)
+PARTNER_GOALS = {
+    "platform": ("the head of partnerships or integrations at this booking platform",
+                 "an intro call about integrating TourIQ, so any of their operators is one click from dynamic pricing. Start with one pilot client on their platform. "
+                 "We already run live on FareHarbor, which shows we can integrate"),
+    "channel": ("the head of partnerships or integrations at this OTA",
+                "an intro call about a channel: operators' dynamic prices from TourIQ reaching their listings. They already accept dynamic pricing from other providers, "
+                "so the ask is simple"),
+    "referral": ("this revenue manager or pricing consultant",
+                 "a referral partnership: they use TourIQ for the operators they manage, and we pay them a commission on every client they bring"),
+    "agency": ("this agency or software company",
+               "two-way referrals with commission: they bring us tour operators and we bring them clients, each side paid a commission"),
+}
+
+
 def build_prompt(action: str, deal: Deal, option: str = "", pasted: str = "") -> str:
+    if action in OUTREACH_ACTIONS and is_do_not_contact(deal):
+        raise ServiceError("This contact is marked do-not-contact (unsubscribed or a competitor). No outreach drafts.",
+                           code="do_not_contact", status=409)
     ctx = deal_context(deal)
+    who = audience(deal)
+    if who != "operator" and action in ("brief", "first", "follow"):
+        target, goal = PARTNER_GOALS[who]
+        if action == "brief":
+            return ("Write a one-page brief a TourIQ team member reads before contacting a potential partner (not a paying client).\n\n"
+                    "Use these short plain-text headings: What they do; Who they serve; Why a partnership fits; Who to talk to (role); "
+                    "Suggested angle for the first message; Check before contacting.\n"
+                    f"The goal: {goal}.\n\n<partner>\n{ctx}\n</partner>")
+        if action == "first":
+            return (f"Draft a first email from TourIQ to {target}. The goal is {goal}. Subject line under 8 words. "
+                    "Body under 100 words, plain and specific, no sales pitch about prices to their customers. "
+                    "End with a request for a 20-minute call using [booking link].\n\n"
+                    "Return exactly:\nSubject: ...\n\n(body)\n\n"
+                    f"<partner>\n{ctx}\n</partner>")
+        return (f"Draft a short follow-up email to {target} who hasn't answered yet. The goal is still {goal}. "
+                "One useful new line, then the call request with [booking link]. Under 60 words.\n\n"
+                "Return exactly:\nSubject: ...\n\n(body)\n\n"
+                f"<partner>\n{ctx}\n</partner>")
     if action == "brief":
         return ("Write a one-page research brief a sales rep reads before contacting this prospect.\n\n"
                 "Use these short plain-text headings: What they sell; Size and locations; Booking platform (and what it means for TourIQ today); "
@@ -121,6 +210,13 @@ def build_prompt(action: str, deal: Deal, option: str = "", pasted: str = "") ->
                 f"<prospect>\n{ctx}\n</prospect>")
     if action == "follow":
         return (f"Draft this email to the prospect: {FOLLOW_UPS.get(option, FOLLOW_UPS['3'])}\n\n"
+                "Return exactly:\nSubject: ...\n\n(body)\n\n"
+                f"<prospect>\n{ctx}\n</prospect>")
+    if action == "invite":
+        return ("Draft the email that confirms their TourIQ demo. Subject line under 8 words. Body under 110 words: the date and time "
+                "from the notes (or [date and time] if not given), what we'll show (dynamic pricing on their own tours), who from their "
+                "side should join (owner, revenue or operations lead), and the demo deck link if one is given so they can look before "
+                "the call. Offer to move the time with [booking link] if it doesn't suit.\n\n"
                 "Return exactly:\nSubject: ...\n\n(body)\n\n"
                 f"<prospect>\n{ctx}\n</prospect>")
     if action == "tag":
@@ -166,7 +262,7 @@ def get_client() -> anthropic.Anthropic:
     return _client
 
 
-MODEL_FOR = {"brief": "smart", "first": "smart", "follow": "smart", "tag": "fast", "summary": "fast", "next": "fast"}
+MODEL_FOR = {"brief": "smart", "first": "smart", "follow": "smart", "invite": "smart", "tag": "fast", "summary": "fast", "next": "fast"}
 
 
 def model_for(action: str) -> str:

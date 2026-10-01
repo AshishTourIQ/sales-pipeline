@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from django.db import transaction
 from django.utils import timezone
 
-from ..config import ORDER, SOURCES, STAGES, TEMPLATE
+from ..config import ORDER, SOURCES, STAGES, TEMPLATE, TEMPLATES
 from ..models import Deal, Pipeline, StageTaskTemplate, Task
 from .errors import ServiceError
 
@@ -38,14 +38,14 @@ class ResolvedStage:
     num: int | None
 
 
-def default_list(owner_ids: dict[str, str]) -> list[dict]:
-    """The TourIQ template as a stage list; owner usernames resolved to user ids."""
+def default_list(owner_ids: dict[str, str], template: str = "touriq") -> list[dict]:
+    """A pipeline template as a stage list; owner usernames resolved to user ids."""
     return [
         {
             "key": s.key, "name": s.name, "phase": s.phase, "limit": s.limit, "owner_id": owner_ids.get(s.owner, ""),
             **({"optional": True} if s.optional else {}), **({"lane": True} if s.lane else {}),
         }
-        for s in TEMPLATE
+        for s in TEMPLATES.get(template, TEMPLATES["touriq"])[1]
     ]
 
 
@@ -132,7 +132,8 @@ def resolve(pipeline: Pipeline, key: str) -> str:
     """A built-in stage that was removed maps to the next stage that still exists."""
     if exists(pipeline, key):
         return key
-    route = main_keys(pipeline)
+    # Optional stages (Pilot, Offer sent) are only entered by choice, never as a stand-in
+    route = [s.key for s in resolved(pipeline) if not s.lane and not s.optional]
     if key in ORDER:
         for k in ORDER[ORDER.index(key) + 1:]:
             if k in route:

@@ -1,16 +1,18 @@
 "use client";
 
-import { Plus } from "lucide-react";
+import { ClipboardList, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
-import { useSaving, useSamples } from "../../api/hooks";
+import { qk, useSaving, useSamples } from "../../api/hooks";
 import { useData } from "../../context/data-context";
 import { useUi } from "../../context/ui-context";
 import { isStuck } from "../../lib/pipeline";
+import { BoothQueueBanner } from "../booth/BoothSync";
 import { ConfirmDialog } from "../dialogs/ConfirmDialog";
 import { useDueCount } from "./Sidebar";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 const TITLES = { tasks: "Tasks", dash: "Dashboard", guide: "Workflow guide", settings: "Settings" } as const;
 
@@ -46,9 +48,14 @@ export function TopBar() {
       )}
       <span className="hidden whitespace-nowrap text-xs text-ink-3 tab:inline">{ready ? (saving ? "Saving…" : "All changes saved") : ""}</span>
       {canWrite && ready && pipeline && (
-        <Button variant="primary" onClick={() => ui.openCapture()} className="px-[11px] tab:px-3">
-          <Plus strokeWidth={2.2} />Add lead
-        </Button>
+        <>
+          <Button onClick={ui.openBooth} className="px-[11px] tab:px-3" title="The Arival booth sheet: score a visitor and file them">
+            <ClipboardList />Booth lead
+          </Button>
+          <Button variant="primary" onClick={() => ui.openCapture()} className="px-[11px] tab:px-3">
+            <Plus strokeWidth={2.2} />Add lead
+          </Button>
+        </>
       )}
     </header>
   );
@@ -58,13 +65,20 @@ export function Banners() {
   const ui = useUi();
   const { canWrite, canAdmin, deals, error, pipeline } = useData();
   const { remove } = useSamples();
+  const qc = useQueryClient();
   const [confirm, setConfirm] = useState(false);
   const hasSamples = deals.some((d) => d.sample);
   const cls = "mx-3.5 mt-2.5 flex flex-wrap items-center gap-2.5 rounded-[10px] px-3.5 py-2.5 text-[13px] tab:mx-[18px] tab:mt-3 desk:mx-6";
   return (
     <>
       {!canWrite && <div className={`${cls} bg-warn-soft text-warn`}>You can view this pipeline but not change it. Ask the owner for Contributor access to edit.</div>}
-      {error && <div className={`${cls} bg-warn-soft text-warn`}>{error}</div>}
+      {error && (
+        <div className={`${cls} bg-warn-soft text-warn`} role="status">
+          {error}
+          <Button size="xs" onClick={() => void qc.refetchQueries({ queryKey: qk.all })}>Retry</Button>
+        </div>
+      )}
+      <BoothQueueBanner />
       {hasSamples && ui.view === "board" && (
         <div className={`${cls} bg-sample-soft text-sample`}>
           Sample deals are loaded so you can try things out.

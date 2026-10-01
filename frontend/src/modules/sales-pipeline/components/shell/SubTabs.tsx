@@ -32,12 +32,12 @@ export function useSubTabs(view: View): Tab[] {
         { v: "done", label: "Done" },
       ];
     }
-    if (view === "dash") return [["score", "Scoreboard"], ["funnel", "Conversion"], ["sources", "Sources and losses"], ["team", "Team"]].map(([v, label]) => ({ v: v!, label: label! }));
+    if (view === "dash") return [["score", "Scoreboard"], ["journey", "Journey"], ["booth", "Booth"], ["funnel", "Conversion"], ["sources", "Sources and losses"], ["team", "Team"], ["involvement", "Involvement"]].map(([v, label]) => ({ v: v!, label: label! }));
     if (view === "guide") {
       return [["funnel", "Before the pipeline"], ["find", "Find"], ["engage", "Engage"], ["win", "Win"], ["launch", "Launch"], ["lanes", "Side lanes"], ["rules", "Ground rules"]]
         .map(([v, label]) => ({ v: v!, label: label!, dot: phaseDot(v!) }));
     }
-    return [["profile", "You and team"], ["stages", "Stages"], ["rules", "Automation"], ["targets", "Targets"], ["products", "Products"], ["data", "Import and export"]].map(([v, label]) => ({ v: v!, label: label! }));
+    return [["profile", "You and team"], ["stages", "Stages"], ["rules", "Automation"], ["booth", "Booth form"], ["links", "Files and links"], ["integrations", "Integrations"], ["targets", "Targets"], ["products", "Products"], ["data", "Import and export"]].map(([v, label]) => ({ v: v!, label: label! }));
   }, [view, deals, stages, flags, tasks, openTasks, ui.filters, ui.taskOwnerId, stageTasks]);
 }
 

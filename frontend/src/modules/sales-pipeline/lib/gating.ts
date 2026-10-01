@@ -33,5 +33,9 @@ export function describe(r: Requirements): string {
   return parts.join(" and ");
 }
 
-/** Only forward moves along this pipeline's main route are gated. */
-export const gated = (p: Pipeline | null | undefined, from: StageKey, to: StageKey): boolean => isForwardIn(p, from, to);
+/** Side routes toward the demo: entering them never waits on the current stage's tasks. */
+const UNGATED_TARGETS: StageKey[] = ["offer"];
+
+/** Only forward moves along this pipeline's main route are gated (not into "Offer sent"). */
+export const gated = (p: Pipeline | null | undefined, from: StageKey, to: StageKey): boolean =>
+  !UNGATED_TARGETS.includes(to) && isForwardIn(p, from, to);

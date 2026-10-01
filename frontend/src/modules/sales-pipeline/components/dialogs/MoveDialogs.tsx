@@ -8,13 +8,13 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { useMoveDeal } from "../../api/hooks";
-import { LOSS_REASONS, NURTURE_REASONS, PILOT_CAP } from "../../config/template";
+import { CALL_TYPES, isCompetitor, isTrack, LOSS_REASONS, NURTURE_REASONS, PILOT_CAP, TRACKS } from "../../config/template";
 import { useData } from "../../context/data-context";
 import { useModule } from "../../context/module-context";
 import { useUi } from "../../context/ui-context";
 import { addDays } from "../../lib/dates";
 import { describe, gated, requirements } from "../../lib/gating";
-import type { Deal, MoveDealInput } from "../../types";
+import type { CallType, Deal, MoveDealInput, Track } from "../../types";
 import { Field, Grid, OptionList } from "../common";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -44,12 +44,17 @@ export function MoveDialogs() {
   const reqs = deal ? requirements(deal, tasks) : null;
   const blocked = !!(deal && to && reqs && gated(pipeline, deal.stage, to) && !reqs.done);
 
-  const needsDialog = blocked || to === "lost" || to === "nurture" || to === "s6" || (to === "pilot" && deals.filter((d) => d.stage === "pilot").length >= PILOT_CAP);
+  const needsDialog = blocked || to === "lost" || to === "nurture" || to === "s6" || to === "offer" || to === "s9" || (to === "pilot" && deals.filter((d) => d.stage === "pilot").length >= PILOT_CAP);
 
   useEffect(() => {
     setOverride(null);
     if (!req) return;
     if (!deal || !canWrite || deal.stage === req.to) { ui.clearMove(); return; }
+    if (isCompetitor(deal) && req.to !== "lost") {
+      toast.error("This company is a competitor: do not contact. It stays in Lost.");
+      ui.clearMove();
+      return;
+    }
     if (blocked && !canOverride && reqs) {
       toast.error(`Finish the ${describe(reqs)} in ${label(deal.stage)} first. The deal moves on by itself when they're done.`);
       ui.clearMove();
@@ -72,7 +77,7 @@ export function MoveDialogs() {
         onClose={close}
         onConfirm={(reason) => {
           // Lanes and demo dates still get their own dialog; everything else moves now
-          if (to === "s6") { setOverride({ reason }); return; }
+          if (to === "s6" || to === "s9") { setOverride({ reason }); return; }
           move(deal, { to, force: true, overrideReason: reason });
           close();
         }}
@@ -84,6 +89,8 @@ export function MoveDialogs() {
   if (to === "lost") return <LostDialog deal={deal} onClose={close} onMove={(i) => { move(deal, i); close(); }} />;
   if (to === "nurture") return <NurtureDialog onClose={close} onMove={(i) => { move(deal, i); close(); }} />;
   if (to === "s6") return <DemoDialog deal={deal} onClose={close} onMove={(i) => { move(deal, { ...i, ...force }); close(); }} />;
+  if (to === "offer") return <OfferDialog deal={deal} onClose={close} onMove={(i) => { move(deal, i); close(); }} />;
+  if (to === "s9") return <CallTypeDialog deal={deal} onClose={close} onMove={(i) => { move(deal, { ...i, ...force }); close(); }} />;
   if (to !== "pilot") return null;
   return (
     <ConfirmDialog
@@ -191,6 +198,50 @@ function NurtureDialog({ onClose, onMove }: { onClose: () => void; onMove: (i: M
         <DialogFooter>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={() => onMove({ to: "nurture", nurtureReason: reason, reengageDate: date || addDays(60), note: note.trim() || undefined })}>Move to Nurture</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** "Offer sent" needs to know what was offered: its tasks depend on it. */
+function OfferDialog({ deal, onClose, onMove }: { deal: Deal; onClose: () => void; onMove: (i: MoveDealInput) => void }) {
+  const [track, setTrack] = useState<Track>(deal.track || (deal.booth?.offer && isTrack(deal.booth.offer) ? deal.booth.offer : "analysis"));
+  return (
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent>
+        <DialogTitle>Offer sent</DialogTitle>
+        <DialogDescription>What did {deal.company.name || "they"} take instead of a demo? The tasks and reminders follow from it.</DialogDescription>
+        <Field id="offerTrack" label="Offer">
+          <NativeSelect id="offerTrack" value={track} onChange={(e) => setTrack(e.target.value as Track)}>
+            {TRACKS.map(([k, text]) => <option key={k} value={k}>{text}</option>)}
+          </NativeSelect>
+        </Field>
+        <DialogFooter>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={() => onMove({ to: "offer", track })}>Move to Offer sent</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Second call: which one? The tasks follow from it. */
+function CallTypeDialog({ deal, onClose, onMove }: { deal: Deal; onClose: () => void; onMove: (i: MoveDealInput) => void }) {
+  const [callType, setCallType] = useState<CallType>(deal.callType || "commercial");
+  return (
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent>
+        <DialogTitle>Next call</DialogTitle>
+        <DialogDescription>After the demo, {deal.company.name || "they"} either want their team to see it, or want to talk price.</DialogDescription>
+        <Field id="callType" label="Next call">
+          <NativeSelect id="callType" value={callType} onChange={(e) => setCallType(e.target.value as CallType)}>
+            {CALL_TYPES.map(([k, text, sub]) => <option key={k} value={k}>{text}: {sub}</option>)}
+          </NativeSelect>
+        </Field>
+        <DialogFooter>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={() => onMove({ to: "s9", callType })}>Move</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

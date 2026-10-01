@@ -58,3 +58,22 @@ def test_proposal_waits_for_signature():
     assert [(t.title, t.blocking) for t in ts] == [
         ("Review the proposal before it's sent", True), ("Chase the unsigned proposal", False),
         ("Second reminder on the proposal", False), ("Get the contract signed: tick when signed", True)]
+
+
+def test_offer_sent_tasks_by_track():
+    send = today + timedelta(days=2)
+    ts = rule_tasks("offer", DEFAULT_RULES, RuleExtra(offer="audit", offer_due=send))
+    assert titles(ts) == [
+        "Send the audit form for their booking data", "Send them the audit report",
+        "Reminder (day 3): ask them to book a demo", "Reminder (day 7): ask again to book a demo",
+        "No demo after 14 days: move to Nurture", "Demo booked: tick when they book",
+    ]
+    assert [t.due for t in ts] == [send, today + timedelta(7), today + timedelta(3), today + timedelta(7), today + timedelta(14), today + timedelta(14)]
+    assert [t.blocking for t in ts] == [True, True, False, False, False, True]
+    assert titles(rule_tasks("offer", DEFAULT_RULES, RuleExtra(offer="analysis")))[0] == "Run the comparative analysis and send it"
+    assert titles(rule_tasks("offer", DEFAULT_RULES, RuleExtra(offer="game")))[0] == "Send their game result and the demo link"
+    assert rule_tasks("offer", DEFAULT_RULES, RuleExtra(offer="game"))[0].due == today
+
+
+def test_not_a_prospect_gets_no_review():
+    assert rule_tasks("lost", DEFAULT_RULES, RuleExtra(loss_reason="Not a prospect")) == []

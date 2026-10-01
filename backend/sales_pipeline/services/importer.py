@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import Company, Contact, Deal
+from ..config import category_from_text
+from ..models import Company, Contact, Deal, Task
 from . import stages
 from .deals import Actor, _history, _task, add_activity, fit_score
 from .errors import ServiceError
@@ -44,8 +45,11 @@ def import_rows(tenant_id, pipeline, actor: Actor, rows: list[dict]) -> dict:
             skipped += 1
             continue
         existing.add(name.lower())
-        # Lead Tracker stages are built-in keys; a removed one maps to the next stage that exists
-        stage = stages.resolve(pipeline, r.get("stage") or "s1")
+        category = category_from_text(r.get("category", ""))
+        competitor = category == "competitor"
+        # Lead Tracker stages are built-in keys; a removed one maps to the next stage that exists.
+        # Competitors are never contacted: straight to Lost.
+        stage = "lost" if competitor else stages.resolve(pipeline, r.get("stage") or "s1")
         last = _date(r.get("last", ""))
         at = timezone.make_aware(datetime.combine(last, time(12))) if last else timezone.now()
         owner = users.get((r.get("owner") or "").strip().lower())
@@ -55,13 +59,13 @@ def import_rows(tenant_id, pipeline, actor: Actor, rows: list[dict]) -> dict:
 
         company = Company.objects.create(
             tenant_id=tenant_id, name=name, region=r.get("region", ""), segment=r.get("segment", ""),
-            platform=r.get("platform", ""), reachable=bool(r.get("email") or r.get("linkedin")),
+            platform=r.get("platform", ""), reachable=bool(r.get("email") or r.get("linkedin")), category=category,
         )
         contact = None
         if r.get("contact") or r.get("email"):
             contact = Contact.objects.create(
                 tenant_id=tenant_id, company=company, name=r.get("contact", ""), title=r.get("title", ""),
-                email=r.get("email", ""), linkedin=r.get("linkedin", ""),
+                email=r.get("email", ""), linkedin=r.get("linkedin", ""), opted_out=competitor,
             )
         try:
             fit = float(r["fit"]) if r.get("fit") not in (None, "") else float(fit_score(company))
@@ -75,7 +79,7 @@ def import_rows(tenant_id, pipeline, actor: Actor, rows: list[dict]) -> dict:
             owner=owner, source=r.get("source", ""), fit=round(fit, 1), snapshot_sent=bool(r.get("snap")),
             demo_date=f"{r['demo']}T09:00" if _date(r.get("demo", "")) else "",
             payment={"status": "Paid" if paid else "Invoiced" if stages.reached_or_past(pipeline, stage, "s11") else "Not invoiced"},
-            loss_reason="Other" if stage == "lost" else "",
+            loss_reason=("Not a prospect" if competitor else "Other") if stage == "lost" else "",
             reengage_date=(next_date or timezone.localdate() + timedelta(days=60)) if stage == "nurture" else None,
             created_by=actor.user, created_at=at,
         )
@@ -83,6 +87,10 @@ def import_rows(tenant_id, pipeline, actor: Actor, rows: list[dict]) -> dict:
         if r.get("notes"):
             add_activity(deal, "note", r["notes"], label, at=at)
         add_activity(deal, "note", "Imported from the Lead Tracker", label)
+        if competitor:
+            add_activity(deal, "note", "Competitor: do not contact.", label)
+            created += 1
+            continue
         if r.get("next"):
             _task(deal, r["next"], owner, next_date, actor, auto=False, stage=stage)
         fu = _date(r.get("fu", ""))

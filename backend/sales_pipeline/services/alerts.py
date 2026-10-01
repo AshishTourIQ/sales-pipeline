@@ -5,6 +5,7 @@ Scheduled checks (run by Celery Beat, one tenant at a time inside tenant_context
 - nurture due     → email the owner once per check-back date
 - late payment    → a task for the owner (never blocks onboarding), once per invoice
 - daily digest    → each team member's overdue + due-today tasks
+- Tier A untouched → email the owner AND the GTM lead when nobody reached out in time
 
 Each alert is recorded in DealAlert first; the unique (deal, kind) constraint
 means a breach is only ever reported once, even if jobs overlap or retry.
@@ -18,11 +19,13 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from ..config import TIER_A_TOUCH_HOURS
 from ..models import Deal, DealAlert, Task
 from .deals import Actor, _task
 from .flags import days_in_stage, over_limit, payment_late, reengage_due
 from .notify import deal_url, render, send_email
 from .pipelines import stage_def, team_users
+from .speed import untouched_tier_a
 
 User = get_user_model()
 SYSTEM = Actor(None, "Pipeline automation")
@@ -33,6 +36,7 @@ class RunReport:
     stuck: int = 0
     nurture: int = 0
     late_payment_tasks: int = 0
+    tier_a: int = 0
     emails: int = 0
     digests: int = 0
     details: list[str] = field(default_factory=list)
@@ -102,6 +106,29 @@ def check_late_payments(tenant_id, report: RunReport) -> None:
         report.late_payment_tasks += 1
 
 
+def check_tier_a(tenant_id, report: RunReport) -> None:
+    by_recipient: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    now = timezone.now()
+    for d in untouched_tier_a(tenant_id, now):
+        if not _claim(d, "tier_a_untouched"):
+            continue
+        report.tier_a += 1
+        hours = int((now - d.created_at).total_seconds() // 3600)
+        row = (d.company.name, f"Tier A, met {hours} hours ago; nobody has reached out yet. Owner: {d.owner.display_name if d.owner else 'nobody'}",
+               deal_url(d.id))
+        for to in {getattr(d.owner, "email", ""), settings.GTM_LEAD_EMAIL}:
+            if to:
+                by_recipient[to].append(row)
+    for to, rows in by_recipient.items():
+        html, text = render(
+            f"{len(rows)} Tier A lead{'s' if len(rows) != 1 else ''} not contacted",
+            f"The best leads from the booth, and nobody has emailed, called or ticked the follow-up within {TIER_A_TOUCH_HOURS} hours.",
+            rows,
+        )
+        send_email([to], f"Tier A not contacted: {', '.join(r[0] for r in rows[:3])}{'…' if len(rows) > 3 else ''}", html, text)
+        report.emails += 1
+
+
 def send_digests(tenant_id, report: RunReport) -> None:
     today = timezone.localdate()
     for u in team_users(tenant_id):
@@ -133,6 +160,7 @@ def run_checks(tenant_id) -> RunReport:
     check_stuck(tenant_id, report)
     check_nurture(tenant_id, report)
     check_late_payments(tenant_id, report)
+    check_tier_a(tenant_id, report)
     return report
 
 

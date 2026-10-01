@@ -13,7 +13,7 @@ def test_other_tenant_sees_nothing(api, ws):
     other_tenant, other_users, _ = make_tenant("othertours")
     c = APIClient()
     c.force_authenticate(other_users["param"])
-    assert c.get("/api/sales-pipeline/deals/").data == []
+    assert c.get("/api/sales-pipeline/deals/").data["results"] == []
     assert c.get(f"/api/sales-pipeline/deals/{d['id']}/").status_code == 404
     r = c.post(f"/api/sales-pipeline/deals/{d['id']}/move/", {"to": "s6"}, format="json")
     assert r.status_code == 404

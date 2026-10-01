@@ -51,9 +51,13 @@ def requirements(deal: Deal) -> Requirements:
     return req
 
 
+# Side routes toward the demo: entering them never waits on the current stage's tasks
+UNGATED_TARGETS = {"offer"}
+
+
 def gated(pipeline, frm: str, to: str) -> bool:
-    """Only forward moves along this pipeline's main route are gated."""
-    return stages.is_forward(pipeline, frm, to)
+    """Only forward moves along this pipeline's main route are gated (not into "Offer sent")."""
+    return to not in UNGATED_TARGETS and stages.is_forward(pipeline, frm, to)
 
 
 def advance_target(deal: Deal) -> str | None:

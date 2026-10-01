@@ -1,14 +1,16 @@
 "use client";
 
-import { Calendar } from "lucide-react";
+import { ArrowRightLeft, Calendar } from "lucide-react";
 import { memo } from "react";
 import { Badge } from "@/components/ui/badge";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { CHECKLISTS } from "../../config/template";
+import { CHECKLISTS, SCORE_MAX, TRACKS } from "../../config/template";
 import { useData } from "../../context/data-context";
 import { useUi } from "../../context/ui-context";
 import { daysSince, dueLabel, fmtDay, today } from "../../lib/dates";
 import { requirements } from "../../lib/gating";
+import { tierVariant } from "../../lib/scoring";
 import { isStuck, nearLimit, reachedOrPast, stageDef } from "../../lib/pipeline";
 import type { Deal, Pipeline } from "../../types";
 import { Avatar } from "../common";
@@ -29,6 +31,34 @@ export function DaysLabel({ deal, pipeline }: { deal: Deal; pipeline: Pipeline |
     <span className={cls} title={`${days} days in this stage${sd.limit ? `, limit ${sd.limit}` : ""}`}>
       {days}d{sd.limit ? ` / ${sd.limit}d` : ""}
     </span>
+  );
+}
+
+/**
+ * "Move to…" on the card: drag-and-drop doesn't work on touch screens (booth tablets)
+ * or from the keyboard. Goes through the same move checks and dialogs as a drop.
+ */
+function MoveMenu({ deal }: { deal: Deal }) {
+  const { stages } = useData();
+  const ui = useUi();
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button type="button" aria-label={`Move ${deal.company.name || "this deal"} to another stage`} title="Move to…"
+          onClick={stop} onKeyDown={stop} onPointerDown={stop}
+          className="-my-1 -mr-1 grid size-7 flex-none place-items-center rounded-md text-ink-3 hover:bg-hover hover:text-ink">
+          <ArrowRightLeft className="size-[14px]" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-[60vh] w-[230px] overflow-y-auto" onClick={stop}>
+        {stages.filter((s) => s.key !== deal.stage).map((s) => (
+          <DropdownMenuItem key={s.key} onSelect={() => ui.requestMove(deal.id, s.key)}>
+            {s.num != null ? `${s.num}. ` : ""}{s.name}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -68,6 +98,10 @@ export const DealCard = memo(function DealCard({ deal }: { deal: Deal }) {
       <div className="mt-0.5 truncate text-[12.5px] text-ink-2">{[deal.contact.name, deal.contact.title].filter(Boolean).join(", ") || "No contact yet"}</div>
       <div className="mt-[9px] flex flex-wrap gap-1 [&>span]:whitespace-normal">
         {deal.sample && <Badge variant="sample">Sample</Badge>}
+        {deal.event && <Badge variant="brand" title="The event this lead came from">{deal.event}</Badge>}
+        {deal.company.category === "competitor" && <Badge variant="over" title="Never contact: no emails or AI drafts">Competitor</Badge>}
+        {deal.stage === "offer" && deal.track && <Badge variant="brand" title="Offer sent: waiting for them to book a demo">{TRACKS.find(([k]) => k === deal.track)?.[1]}</Badge>}
+        {deal.booth?.tier && <Badge variant={tierVariant(deal.booth.tier)} title={`Booth tier ${deal.booth.tier}: ${deal.booth.points} of ${SCORE_MAX} points`}>Tier {deal.booth.tier}</Badge>}
         {deal.interest && <Badge variant={interestVariant(deal.interest)}>{deal.interest}</Badge>}
         {deal.company.platform && <Badge>{deal.company.platform}</Badge>}
         {deal.fit > 0 && <Badge title="Fit score out of 5">Fit {deal.fit}</Badge>}
@@ -90,6 +124,7 @@ export const DealCard = memo(function DealCard({ deal }: { deal: Deal }) {
           <span className="font-medium text-warn">No next step</span>
         ) : null}
         <span className="ml-auto whitespace-nowrap"><DaysLabel deal={deal} pipeline={pipeline} /></span>
+        {canWrite && <MoveMenu deal={deal} />}
       </div>
     </div>
   );

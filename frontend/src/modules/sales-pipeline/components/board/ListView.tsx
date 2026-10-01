@@ -6,10 +6,12 @@ import {
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { NativeSelect } from "@/components/ui/native-select";
+import { SCORE_MAX } from "../../config/template";
 import { useData } from "../../context/data-context";
 import { useUi } from "../../context/ui-context";
 import { daysSince, dueLabel, today } from "../../lib/dates";
 import { dealsInPhase, filterDeals } from "../../lib/selectors";
+import { tierVariant } from "../../lib/scoring";
 import type { Deal, StageKey } from "../../types";
 import { Avatar } from "../common";
 import { DaysLabel } from "./DealCard";
@@ -33,7 +35,10 @@ export function ListView() {
       id: "company", header: "Company",
       cell: ({ row: { original: d } }) => (
         <>
-          <div className="font-semibold">{d.company.name || "Unnamed"}{d.sample && <> <Badge variant="sample">Sample</Badge></>}</div>
+          <div className="font-semibold">
+            {d.company.name || "Unnamed"}{d.sample && <> <Badge variant="sample">Sample</Badge></>}
+            {d.company.category === "competitor" && <> <Badge variant="over">Competitor</Badge></>}
+          </div>
           <div className="text-xs text-ink-3">{[d.contact.name, d.contact.title].filter(Boolean).join(", ") || "No contact yet"}</div>
         </>
       ),
@@ -58,6 +63,12 @@ export function ListView() {
     }),
     col.accessor((d) => d.source || "~", { id: "source", header: "Source", cell: ({ row: { original: d } }) => d.source }),
     col.accessor((d) => d.company.platform || "~", { id: "platform", header: "Platform", cell: ({ row: { original: d } }) => d.company.platform }),
+    col.accessor((d) => d.booth?.tier || "~", {
+      id: "tier", header: "Tier",
+      cell: ({ row: { original: d } }) => d.booth?.tier
+        ? <Badge variant={tierVariant(d.booth.tier)} title={`${d.booth.points} of ${SCORE_MAX} points`}>{d.booth.tier}</Badge>
+        : null,
+    }),
     col.accessor((d) => d.fit, { id: "fit", header: "Fit", cell: (c) => <span className="tabular-nums">{c.getValue()}</span> }),
     col.accessor((d) => daysSince(d.stageChangedAt), {
       id: "days", header: "In stage",

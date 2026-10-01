@@ -53,3 +53,22 @@ class TenantScopedMixin:
     @property
     def actor(self) -> Actor:
         return Actor.of(self.request.user)  # type: ignore[attr-defined]
+
+
+PAGE_DEFAULT = 500
+PAGE_MAX = 1000
+
+
+def paged(request: Request, qs, out) -> dict:
+    """{count, next_offset, results} for ?limit=&offset= (limit at most PAGE_MAX). next_offset is
+    null on the last page. Big pipelines come back in pages instead of one huge response."""
+    def num(name, default):
+        try:
+            return max(0, int(request.query_params.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+    limit = min(PAGE_MAX, num("limit", PAGE_DEFAULT)) or PAGE_DEFAULT
+    offset = num("offset", 0)
+    count = qs.count()
+    rows = [out(x) for x in qs[offset:offset + limit]]
+    return {"count": count, "next_offset": offset + limit if offset + limit < count else None, "results": rows}

@@ -1,4 +1,4 @@
-import { PLATFORMS, SEGMENTS, SOURCES } from "../config/template";
+import { CATEGORIES, PLATFORMS, SEGMENTS, SOURCES } from "../config/template";
 import type { Deal, ImportRow, Pipeline, StageKey, TeamMember } from "../types";
 import { addDays, anyDate, DAY, daysSince, today, ymd } from "./dates";
 import { stageLabel, stagesOf } from "./pipeline";
@@ -99,12 +99,14 @@ export function previewImport(src: string | string[][], existingCompanies: Set<s
     return { rows: [], skippedExamples: 0, duplicates: 0, error: "Couldn't find a header row with a 'Company' column. Include the header row from the Lead Tracker." };
   }
   const head = (rows[hi] ?? []).map((c) => String(c).trim().toLowerCase());
-  const col = (name: string) => head.findIndex((h) => h === name || h.indexOf(name) === 0);
+  // Exact header first, so "Company" isn't taken by a "Company type" column that comes before it
+  const col = (name: string) => { const i = head.indexOf(name); return i >= 0 ? i : head.findIndex((h) => h.indexOf(name) === 0 && h !== "company type"); };
   const C = {
     company: col("company"), contact: col("contact"), title: col("title"), email: col("email"), linkedin: col("linkedin"),
     segment: col("segment"), platform: col("booking platform"), region: col("city"), source: col("source"), fit: col("fit"),
     stage: col("stage"), owner: col("owner"), last: col("last touch"), next: col("next action"), nextDate: col("next date"),
     snap: col("snapshot"), demo: col("demo date"), notes: col("notes"), fu: col("follow-up date"), paid: col("paid"),
+    category: [col("company type"), col("type"), col("category")].find((i) => i >= 0) ?? -1,
   };
   const g = (r: string[], k: keyof typeof C) => (C[k] >= 0 ? String(r[C[k]] ?? "").trim() : "");
   let skipped = 0;
@@ -120,6 +122,7 @@ export function previewImport(src: string | string[][], existingCompanies: Set<s
       source: mapSource(g(r, "source")), fit: g(r, "fit"), stage, paid: paid || /^y/i.test(g(r, "paid")), owner: g(r, "owner"),
       last: anyDate(g(r, "last")), next: g(r, "next"), nextDate: anyDate(g(r, "nextDate")),
       snap: /^y/i.test(g(r, "snap")), demo: anyDate(g(r, "demo")), notes: g(r, "notes"), fu: anyDate(g(r, "fu")),
+      category: g(r, "category"),
     });
   }
   const duplicates = out.filter((r) => existingCompanies.has(r.company.toLowerCase())).length;
@@ -133,10 +136,10 @@ const csvCell = (v: unknown): string => {
 
 export function dealsToCsv(deals: Deal[], p: Pipeline, team: TeamMember[]): string {
   const name = (id: string) => team.find((m) => m.id === id)?.name ?? id;
-  const head = ["Company", "Contact", "Title", "Email", "Phone", "LinkedIn", "Website", "Region", "Segment", "Booking platform", "Fit", "Source", "Stage", "Owner", "Days in stage", "Interest", "Snapshot sent", "Demo date", "Payment", "Loss reason", "Re-engage date", "Created"];
+  const head = ["Company", "Company type", "Contact", "Title", "Email", "Phone", "LinkedIn", "Website", "Region", "Segment", "Booking platform", "Fit", "Source", "Stage", "Owner", "Days in stage", "Interest", "Snapshot sent", "Demo date", "Payment", "Loss reason", "Re-engage date", "Created"];
   const rows = deals.map((d) => {
     const c = d.company, ct = d.contact;
-    return [c.name, ct.name, ct.title, ct.email, ct.phone, ct.linkedin, c.website, c.region, c.segment, c.platform, d.fit, d.source, stageLabel(p, d.stage), name(d.ownerId), daysSince(d.stageChangedAt), d.interest, d.snapshotSent ? "Yes" : "No", d.demoDate, d.payment.status, d.lossReason, d.reengageDate, ymd(d.createdAt)];
+    return [c.name, CATEGORIES.find(([k]) => k === c.category)?.[1] ?? "", ct.name, ct.title, ct.email, ct.phone, ct.linkedin, c.website, c.region, c.segment, c.platform, d.fit, d.source, stageLabel(p, d.stage), name(d.ownerId), daysSince(d.stageChangedAt), d.interest, d.snapshotSent ? "Yes" : "No", d.demoDate, d.payment.status, d.lossReason, d.reengageDate, ymd(d.createdAt)];
   });
   return [head, ...rows].map((r) => r.map(csvCell).join(",")).join("\n");
 }
@@ -160,9 +163,10 @@ export const exportFilename = (p: Pipeline): string => `${p.name.replace(/[^\w-]
 
 /* ---------- Import template: the columns previewImport() reads, with an example row it skips ---------- */
 
-type TplCol = { head: string; width: number; list?: "stage" | "owner" | "source" | "segment" | "platform" | "yesno"; date?: boolean; hint: string };
+type TplCol = { head: string; width: number; list?: "stage" | "owner" | "source" | "segment" | "platform" | "type" | "yesno"; date?: boolean; hint: string };
 const TPL_COLS: TplCol[] = [
   { head: "Company", width: 28, hint: "Required. Rows without a company are ignored; a company already in the pipeline is skipped." },
+  { head: "Company type", width: 22, list: "type", hint: "Tour operator, Booking platform, OTA, Revenue manager, Agency, or Competitor. Competitors go straight to Lost and are never contacted." },
   { head: "Contact", width: 20, hint: "Contact person's name." },
   { head: "Title", width: 18, hint: "Their role, e.g. Owner or General manager." },
   { head: "Email", width: 30, hint: "Work email." },
@@ -192,6 +196,7 @@ function templateLists(p: Pipeline, team: TeamMember[]): Record<NonNullable<TplC
     source: SOURCES.map((s) => s[0]),
     segment: SEGMENTS,
     platform: PLATFORMS,
+    type: CATEGORIES.map(([, label]) => label),
     yesno: ["Yes", "No"],
   };
 }
@@ -199,7 +204,7 @@ function templateLists(p: Pipeline, team: TeamMember[]): Record<NonNullable<TplC
 function exampleRow(p: Pipeline, team: TeamMember[]): Record<string, string> {
   const first = stagesOf(p).find((s) => !s.lane);
   return {
-    Company: EXAMPLE_COMPANY, Contact: "Jane Doe", Title: "Owner", Email: "jane@example.com", Segment: SEGMENTS[0] ?? "",
+    Company: EXAMPLE_COMPANY, "Company type": "Tour operator", Contact: "Jane Doe", Title: "Owner", Email: "jane@example.com", Segment: SEGMENTS[0] ?? "",
     "Booking platform": PLATFORMS[0] ?? "", City: "Miami", Source: SOURCES[0]?.[0] ?? "", Fit: "4", Stage: first?.name ?? "",
     Owner: team[0]?.name ?? "", "Last touch": today(), "Next action": "Send intro email", "Next date": addDays(2),
     "Snapshot sent": "No", Paid: "No", Notes: "Met at the booth",
@@ -214,6 +219,10 @@ export function templateCsv(p: Pipeline, team: TeamMember[]): string {
   // BOM so Excel opens accented names (Bókun) correctly
   return "﻿" + [TPL_COLS.map((c) => c.head), TPL_COLS.map((c) => ex[c.head] ?? "")].map((r) => r.map(csvCell).join(",")).join("\n");
 }
+
+const LIST_TITLES: Record<NonNullable<TplCol["list"]>, string> = {
+  stage: "Stages", owner: "Owners", source: "Sources", segment: "Segments", platform: "Booking platforms", type: "Company types", yesno: "Yes / No",
+};
 
 /** Excel serial for a YYYY-MM-DD day. */
 const serial = (d: string) => Math.round((Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) - Date.UTC(1899, 11, 30)) / DAY);
@@ -258,7 +267,7 @@ export function templateXlsx(p: Pipeline, team: TeamMember[]): Blob {
       name: "Lists",
       widths: listKeys.map(() => 28),
       rows: [
-        ["Stages", "Owners", "Sources", "Segments", "Booking platforms", "Yes / No"],
+        listKeys.map((k) => LIST_TITLES[k]),
         ...Array.from({ length: longest }, (_, i) => listKeys.map((k) => lists[k][i] ?? "")),
       ],
     },

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
-import { SOURCE_NAMES } from "../../config/template";
+import { SOURCE_NAMES, TIER_BANDS } from "../../config/template";
 import { useData } from "../../context/data-context";
 import { useUi } from "../../context/ui-context";
 import { filterDeals } from "../../lib/selectors";
@@ -42,6 +42,10 @@ export function Toolbar() {
         </NativeSelect>
         <NativeSelect aria-label="Lead source" className="flex-[1_1_40%] tab:w-auto tab:flex-none" value={ui.filters.source} onChange={(e) => ui.setFilters({ source: e.target.value })}>
           <OptionList items={SOURCE_NAMES} blank="All sources" />
+        </NativeSelect>
+        <NativeSelect aria-label="Booth tier" className="flex-[1_1_40%] tab:w-auto tab:flex-none" value={ui.filters.tier} onChange={(e) => ui.setFilters({ tier: e.target.value })}>
+          <option value="">All tiers</option>
+          {TIER_BANDS.map(([t]) => <option key={t} value={t}>Tier {t}</option>)}
         </NativeSelect>
         <button
           type="button"

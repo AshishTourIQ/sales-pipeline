@@ -214,7 +214,14 @@ def test_samples(admin_api, ws):
     pid = ws["pipeline"].id
     assert api.post(f"/api/sales-pipeline/pipelines/{pid}/samples/").data == {"created": 14}
     r = api.get(f"/api/sales-pipeline/deals/?pipeline={pid}")
-    assert len(r.data) == 14 and all(d["sample"] for d in r.data)
+    assert r.data["count"] == 14 and all(d["sample"] for d in r.data["results"])
+    # Pages: 5 + 5 + 4, in a stable order
+    first = api.get(f"/api/sales-pipeline/deals/?pipeline={pid}&limit=5").data
+    assert (len(first["results"]), first["next_offset"]) == (5, 5)
+    last = api.get(f"/api/sales-pipeline/deals/?pipeline={pid}&limit=5&offset=10").data
+    assert (len(last["results"]), last["next_offset"]) == (4, None)
+    assert not {d["id"] for d in first["results"]} & {d["id"] for d in last["results"]}
+    assert api.get(f"/api/sales-pipeline/tasks/?pipeline={pid}&limit=2").data["next_offset"] == 2
     assert api.delete(f"/api/sales-pipeline/pipelines/{pid}/samples/").data == {"removed": 14}
 
 
