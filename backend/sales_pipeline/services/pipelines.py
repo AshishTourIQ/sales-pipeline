@@ -92,6 +92,20 @@ def update_settings(tenant_id, data: dict) -> PipelineSettings:
         if len(costs) > 100:
             raise ServiceError("Up to 100 events can have a cost.", code="too_many_events")
         s.event_costs = costs
+    if "outreach" in data:
+        cfg = {**(s.outreach or {})}
+        if "p1_user_id" in (data["outreach"] or {}):
+            uid = str(data["outreach"]["p1_user_id"] or "")
+            if uid and uid not in valid_owner_ids(tenant_id):
+                raise ServiceError("That person isn't part of this workspace.", code="invalid_user")
+            cfg["p1_user_id"] = uid
+        if "app_sender_ids" in (data["outreach"] or {}):
+            ids = [str(i) for i in (data["outreach"]["app_sender_ids"] or []) if i]
+            valid = valid_owner_ids(tenant_id)
+            if any(i not in valid for i in ids):
+                raise ServiceError("Someone picked isn't part of this workspace.", code="invalid_user")
+            cfg["app_sender_ids"] = list(dict.fromkeys(ids))
+        s.outreach = cfg
     s.save()
     return s
 

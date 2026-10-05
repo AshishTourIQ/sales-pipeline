@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { useStageTasks } from "../../api/hooks";
+import { useOutreach, useStageTasks } from "../../api/hooks";
+import { outreachTabCounts } from "../views/OutreachView";
 import { useData } from "../../context/data-context";
 import { useUi, type View } from "../../context/ui-context";
 import { dealsInPhase, filterDeals, taskBuckets } from "../../lib/selectors";
@@ -17,6 +18,7 @@ export function useSubTabs(view: View): Tab[] {
   const ui = useUi();
   const { deals, stages, flags, tasks, openTasks, pipeline } = useData();
   const stageTasks = useStageTasks(view === "tasks" ? pipeline?.id ?? null : null).data;
+  const outreach = useOutreach(view === "outreach").data;
   return useMemo(() => {
     if (view === "board") {
       const f = filterDeals(deals, ui.filters, flags);
@@ -32,13 +34,22 @@ export function useSubTabs(view: View): Tab[] {
         { v: "done", label: "Done" },
       ];
     }
+    if (view === "outreach") {
+      const n = outreachTabCounts(outreach ?? []);
+      return [
+        { v: "today", label: "Today", n: n.today, alert: true },
+        { v: "approvals", label: "Approvals", n: n.approvals },
+        { v: "send", label: "Ready to send", n: n.send },
+        { v: "contacts", label: "Contacts", n: n.contacts },
+      ];
+    }
     if (view === "dash") return [["score", "Scoreboard"], ["journey", "Journey"], ["booth", "Booth"], ["funnel", "Conversion"], ["sources", "Sources and losses"], ["team", "Team"], ["involvement", "Involvement"]].map(([v, label]) => ({ v: v!, label: label! }));
     if (view === "guide") {
       return [["funnel", "Before the pipeline"], ["find", "Find"], ["engage", "Engage"], ["win", "Win"], ["launch", "Launch"], ["lanes", "Side lanes"], ["rules", "Ground rules"]]
         .map(([v, label]) => ({ v: v!, label: label!, dot: phaseDot(v!) }));
     }
-    return [["profile", "You and team"], ["stages", "Stages"], ["rules", "Automation"], ["booth", "Booth form"], ["links", "Files and links"], ["integrations", "Integrations"], ["targets", "Targets"], ["products", "Products"], ["data", "Import and export"]].map(([v, label]) => ({ v: v!, label: label! }));
-  }, [view, deals, stages, flags, tasks, openTasks, ui.filters, ui.taskOwnerId, stageTasks]);
+    return [["profile", "You and team"], ["stages", "Stages"], ["rules", "Automation"], ["booth", "Booth form"], ["outreach", "Outreach"], ["links", "Files and links"], ["integrations", "Integrations"], ["targets", "Targets"], ["products", "Products"], ["data", "Import and export"]].map(([v, label]) => ({ v: v!, label: label! }));
+  }, [view, deals, stages, flags, tasks, openTasks, ui.filters, ui.taskOwnerId, stageTasks, outreach]);
 }
 
 export function SubTabs() {

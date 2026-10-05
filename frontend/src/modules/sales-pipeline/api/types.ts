@@ -4,6 +4,8 @@ import type {
   CreateStageTaskInput, DealUpdateResult, StageTaskTemplate, TaskUpdateResult, CreateBoothLeadInput, InviteInput,
   AddTouchpointInput, IntakeKey, CallType, PipelineTemplate, RecordedCall,
   AddStageInput, StageConfig, StageEdit, StageKey, DuplicateMatch,
+  OutreachContact, OutreachImportRow, OutreachResearchRow, OutreachImportResult, OutreachStep, DraftChannel,
+  ReplyChannel, OutreachPriority, VerifyKey, ResearchKey,
 } from "../types";
 
 export interface PipelinePatch {
@@ -98,6 +100,23 @@ export interface PipelineApi {
   importLeads(pipelineId: string, rows: ImportRow[]): Promise<ImportResult>;
   loadSamples(pipelineId: string): Promise<{ created: number }>;
   removeSamples(pipelineId: string): Promise<{ removed: number }>;
+
+  /* ---- Outreach (server only). Nothing here sends a message: people send by hand and tick Sent. ---- */
+  /** Admin: make someone an outreach approver. */
+  setApprover?(userId: string, canApprove: boolean): Promise<WorkspaceUser>;
+  listOutreach?(campaign?: string): Promise<OutreachContact[]>;
+  /** Admin: the outreach tracker workbook (Contacts + Research tabs). */
+  importOutreach?(input: { campaign: string; contacts: OutreachImportRow[]; research: OutreachResearchRow[] }): Promise<OutreachImportResult>;
+  updateOutreachContact?(id: string, patch: { priority?: OutreachPriority; email?: string; linkedin?: string; notes?: string; verify?: Partial<Record<VerifyKey, boolean>> }): Promise<OutreachContact>;
+  /** value: a date ("" unticks). Sent steps need an approved draft. */
+  setOutreachStep?(id: string, step: OutreachStep, value: string): Promise<OutreachContact>;
+  answerReplyCheck?(id: string, channel: ReplyChannel, replied: boolean): Promise<OutreachContact>;
+  /** Returns everyone listed at that company. verified: true checks the research, false undoes it. */
+  updateResearch?(companyId: string, patch: { research?: Partial<Record<ResearchKey, string>>; website?: string; verified?: boolean }): Promise<OutreachContact[]>;
+  /** Paste a draft from Claude chat; it goes to approval. */
+  saveDraft?(contactId: string, input: { channel: DraftChannel; subject: string; body: string }): Promise<OutreachContact>;
+  reviewDraft?(draftId: string, patch: { subject?: string; body?: string; action?: "approve" | "changes"; note?: string }): Promise<OutreachContact>;
+  deleteDraft?(draftId: string): Promise<OutreachContact>;
 
   /** Claude drafts on the server (Haiku / Sonnet), JSON-validated there. */
   aiDraft(dealId: string, input: AiDraftInput, signal?: AbortSignal): Promise<AiDraftResult>;

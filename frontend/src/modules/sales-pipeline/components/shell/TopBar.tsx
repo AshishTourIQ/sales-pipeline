@@ -14,7 +14,7 @@ import { useDueCount } from "./Sidebar";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-const TITLES = { tasks: "Tasks", dash: "Dashboard", guide: "Workflow guide", settings: "Settings" } as const;
+const TITLES = { tasks: "Tasks", outreach: "Outreach", dash: "Dashboard", guide: "Workflow guide", settings: "Settings" } as const;
 
 export function TopBar() {
   const ui = useUi();

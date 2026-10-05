@@ -46,6 +46,8 @@ class PipelineSettings(TenantModel):
     links = models.JSONField(default=dict, blank=True)
     # What each event cost (booth, travel, sponsorship), for cost per lead / demo / signed: {"Arival 2026": 12000}
     event_costs = models.JSONField(default=dict, blank=True)
+    # Outreach set-up: {"p1_user_id": "<who alone messages P1 contacts>"}
+    outreach = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant"], name="sp_settings_one_per_tenant")]
@@ -81,6 +83,12 @@ class Company(TenantModel):
     reachable = models.BooleanField(default=False)
     # operator | booking_platform | ota | revenue_manager | agency | competitor | other ("" = not set)
     category = models.CharField(max_length=20, blank=True)
+    # Outreach research, from pages someone opened: {"booking_platform", "example_tour", "listed_price",
+    # "price_variation", "demand_language", "size", "sources", "unverified", "notes"}
+    research = models.JSONField(default=dict, blank=True)
+    # Set when a person confirmed the research on the company's own website; cleared when it changes
+    research_verified_at = models.DateTimeField(null=True, blank=True)
+    research_verified_by = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -105,11 +113,39 @@ class Contact(TenantModel):
     decision_maker = models.BooleanField(default=False)
     # Unsubscribed: never email this contact again
     opted_out = models.BooleanField(default=False)
+
+    # ---- Outreach (the Arival outreach tracker: one row per person) ----
+    # "" = not in an outreach list. e.g. "Arival 2026"
+    campaign = models.CharField(max_length=60, blank=True)
+    # The tracker's own ID ("C001"): re-importing the sheet updates instead of duplicating
+    ext_id = models.CharField(max_length=20, blank=True)
+    country = models.CharField(max_length=80, blank=True)
+    # P1 | P2 | P3 | P4 | Review | Skip. P1 is messaged only by the P1 owner (Settings)
+    priority = models.CharField(max_length=8, blank=True)
+    role_type = models.CharField(max_length=40, blank=True)
+    # Yes | After research | No: "Yes" drafts can only be approved by the P1 owner
+    lead_review = models.CharField(max_length=20, blank=True)
+    # Problems found in the export (shared inbox, email not matching the name, duplicate)
+    data_flags = models.TextField(blank=True)
+    # Step → date done ("YYYY-MM-DD"; "arival_meeting" is "YYYY-MM-DDTHH:MM"). Keys in config.OUTREACH_STEPS
+    steps = models.JSONField(default=dict, blank=True)
+    # The one person who messages this contact in the Arival app (never two senders for one person)
+    app_sender = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    # Checks a person ticked before any draft: {"company": true, "person": true, "contact_info": true}
+    verify = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verified_by = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    # "Did they reply?" answered "not yet" on this date, per channel: {"linkedin": "2026-10-02", "email": ...}
+    reply_checked = models.JSONField(default=dict, blank=True)
+    outreach_notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Case-insensitive email lookups (intake, recorded calls, "already in the pipeline?")
-        indexes = [models.Index(F("tenant"), Upper("email"), name="contact_tenant_upper_email")]
+        indexes = [
+            models.Index(F("tenant"), Upper("email"), name="contact_tenant_upper_email"),
+            models.Index(fields=["tenant", "campaign"], name="contact_tenant_campaign"),
+        ]
 
     def __str__(self) -> str:
         return self.name or self.email or "Contact"
@@ -291,8 +327,10 @@ class Touchpoint(TenantModel):
         ("audit_submitted", "Sent booking data for the audit"),
         ("audit_report_sent", "Audit report sent"),
         ("demo_requested", "Asked for a demo"),
+        ("account_requested", "Requested an account"),
         ("demo_booked", "Demo booked"),
         ("demo_held", "Demo held"),
+        ("lead_withdrawn", "Deleted in Peek"),
     ]
     SOURCES = [("booth", "Booth"), ("intake", "Intake API"), ("pipeline", "Pipeline"), ("manual", "Person")]
 
@@ -401,3 +439,37 @@ class AiDraftLog(TenantModel):
 
     class Meta:
         indexes = [models.Index(fields=["tenant", "created_at"])]
+
+
+class OutreachDraft(TenantModel):
+    """
+    A message written in Claude chat and pasted in by the team. An approver checks and edits it;
+    then someone sends it by hand (inbox, LinkedIn, Arival app) and ticks Sent.
+    """
+
+    CHANNELS = [
+        ("li_note", "LinkedIn connection note"),
+        ("li_msg", "LinkedIn message"),
+        ("email", "Email"),
+        ("email_follow", "Email follow-up"),
+        ("app", "Arival app message"),
+    ]
+    STATUSES = [("pending", "Waiting for approval"), ("changes", "Changes asked"), ("approved", "Approved"), ("sent", "Sent")]
+
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="drafts")
+    channel = models.CharField(max_length=16, choices=CHANNELS)
+    subject = models.CharField(max_length=300, blank=True)
+    body = models.TextField()
+    status = models.CharField(max_length=12, choices=STATUSES, default="pending")
+    # What the approver asked to change
+    review_note = models.CharField(max_length=500, blank=True)
+    created_by = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    approved_by = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    sent_by = models.ForeignKey(USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["tenant", "status"])]

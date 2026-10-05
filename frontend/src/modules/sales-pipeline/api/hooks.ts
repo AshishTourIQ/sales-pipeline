@@ -11,7 +11,8 @@ import type {
   ActivityType, AddTouchpointInput, CallType, CreateBoothLeadInput, PipelineTemplate, CreateDealInput, InviteInput, CreateStageTaskInput, CreateTaskInput, Deal, DealMutationResult, DealPatch, ImportRow,
   MoveDealInput, Pipeline, PipelineSettings, StageTaskTemplate, Task, TaskPatch, AddStageInput, StageKey,
 } from "../types";
-import type { PipelinePatch } from "./types";
+import type { OutreachContact, OutreachImportRow, OutreachResearchRow } from "../types";
+import type { PipelineApi, PipelinePatch } from "./types";
 import { ApiError } from "./types";
 
 /** Polling interval for shared data (Redis-aggregate polling now, WebSockets later). */
@@ -615,6 +616,68 @@ export function useDeleteStageTask() {
       qc.setQueryData<Task[]>(qk.tasks(t.pipelineId), (old = []) => old.filter((x) => !gone.has(x.id)));
       toast("Stage task removed.");
     },
+    onError,
+  });
+}
+
+/* ---------- Outreach ---------- */
+
+export const outreachKey = () => [...qk.all, "outreach"] as const;
+
+export function useOutreach(enabled = true) {
+  const { api } = useModule();
+  return useQuery({
+    queryKey: outreachKey(),
+    queryFn: () => api.listOutreach?.() ?? Promise.resolve([] as OutreachContact[]),
+    enabled: enabled && !!api.listOutreach,
+    refetchInterval: POLL_MS,
+  });
+}
+
+function putContacts(qc: QueryClient, rows: OutreachContact[]) {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  qc.setQueryData<OutreachContact[]>(outreachKey(), (old) => old?.map((c) => byId.get(c.id) ?? c));
+}
+
+/** One mutation for every outreach change: each returns the updated people and they replace the cached rows. */
+export function useOutreachAction<V>(fn: (api: PipelineApi, v: V) => Promise<OutreachContact | OutreachContact[]>, success?: string) {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "outreach-action"],
+    mutationFn: (v: V) => fn(api, v),
+    onSuccess: (r) => {
+      putContacts(qc, Array.isArray(r) ? r : [r]);
+      if (success) toast(success);
+    },
+    onError,
+  });
+}
+
+export function useImportOutreach() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "outreach-import"],
+    mutationFn: (input: { campaign: string; contacts: OutreachImportRow[]; research: OutreachResearchRow[] }) => {
+      if (!api.importOutreach) throw new ApiError("Importing needs the server.", 0, "unsupported");
+      return api.importOutreach(input);
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: qk.all }); },
+    onError,
+  });
+}
+
+export function useSetApprover() {
+  const { api } = useModule();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...qk.all, "approver"],
+    mutationFn: ({ userId, canApprove }: { userId: string; canApprove: boolean }) => {
+      if (!api.setApprover) throw new ApiError("Needs the server.", 0, "unsupported");
+      return api.setApprover(userId, canApprove);
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: usersKey() }); },
     onError,
   });
 }

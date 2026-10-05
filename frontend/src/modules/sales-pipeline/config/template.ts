@@ -328,7 +328,7 @@ export const SOURCES: readonly (readonly [name: string, entry: StageKey])[] = [
   ["Client referral", "s5"], ["Platform / OTA intro", "s5"], ["Inbound (website, video)", "s6"],
   ["Pre-booked meeting", "s6"], ["Existing client (expansion)", "s5"], ["Arival app meeting", "s6"],
   ["LinkedIn", "s5"], ["Instagram / Facebook", "s5"], ["Game", "s5"], ["Comparative analysis", "s5"], ["Audit", "s5"],
-  ["Event booth", "s5"],
+  ["Event booth", "s5"], ["Peek app", "s5"],
 ];
 export const SOURCE_NAMES: string[] = SOURCES.map((s) => s[0]);
 /** Met in person at a stand; the event itself is Deal.event */
@@ -346,7 +346,7 @@ export const SEGMENTS = ["Water / boat", "Adventure", "Food / walking / city", "
 export const PLATFORMS = ["FareHarbor", "Peek Pro", "Ventrata", "Rezdy", "Xola", "Checkfront", "Bókun", "Other / unknown"];
 export const LOSS_REASONS = ["Price", "Timing", "Wrong platform", "Chose a competitor", "No reply", "No budget", "Unsubscribed", "Not a prospect", "Other"];
 /** No "worth re-engaging?" review for these */
-export const NO_REVIEW_LOSS_REASONS = ["Unsubscribed", "Not a prospect"];
+export const NO_REVIEW_LOSS_REASONS = ["Unsubscribed", "Not a prospect", "Deleted in Peek"];
 export const NURTURE_REASONS = ["Not now", "No reply after the sequence", "Unsupported platform", "Not a water operator yet", "No-show twice", "Partner hand-off", "Press hand-off", "Other"];
 export const PAY_STATUS = ["Not invoiced", "Invoiced", "Paid", "Late"] as const;
 export const INTERESTS = ["Hot", "Warm", "Cold"] as const;
@@ -466,9 +466,13 @@ export const TOUCHPOINT_KINDS: readonly (readonly [TouchpointKind, string, Track
   ["audit_submitted", "Sent booking data for the audit", "audit"],
   ["audit_report_sent", "Audit report sent", "audit"],
   ["demo_requested", "Asked for a demo", ""],
+  ["account_requested", "Requested an account", ""],
   ["demo_booked", "Demo booked", ""],
   ["demo_held", "Demo held", ""],
+  ["lead_withdrawn", "Deleted in Peek", ""],
 ];
+/** Recorded only by the intake API (Peek deleting a lead), never added by hand */
+export const SYSTEM_TOUCHPOINT_KINDS: TouchpointKind[] = ["lead_withdrawn"];
 export const touchpointLabel = (k: string) => TOUCHPOINT_KINDS.find((x) => x[0] === k)?.[1] ?? k;
 
 export const OFFER_FOR_TIER: Record<Tier, OfferKey> = { A: "demo_booked", B: "audit", C: "analysis", D: "game" };

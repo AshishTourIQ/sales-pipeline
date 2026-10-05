@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { useAddTouchpoint } from "../../api/hooks";
-import { TOUCHPOINT_KINDS, TRACKS, touchpointLabel } from "../../config/template";
+import { SYSTEM_TOUCHPOINT_KINDS, TOUCHPOINT_KINDS, TRACKS, touchpointLabel } from "../../config/template";
 import { useData } from "../../context/data-context";
 import { fmtDay } from "../../lib/dates";
 import type { Deal, TouchpointKind } from "../../types";
@@ -65,7 +65,7 @@ function AddStep({ deal, onDone }: { deal: Deal; onDone: () => void }) {
       <Grid>
         <Field id="tp_kind" label="Step">
           <NativeSelect id="tp_kind" value={kind} onChange={(e) => setKind(e.target.value as TouchpointKind)}>
-            {TOUCHPOINT_KINDS.map(([k, text]) => <option key={k} value={k}>{text}</option>)}
+            {TOUCHPOINT_KINDS.filter(([k]) => !SYSTEM_TOUCHPOINT_KINDS.includes(k)).map(([k, text]) => <option key={k} value={k}>{text}</option>)}
           </NativeSelect>
         </Field>
         {kind === "game_played" ? (

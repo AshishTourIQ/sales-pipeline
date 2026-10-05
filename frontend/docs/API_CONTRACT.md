@@ -235,6 +235,30 @@ invite link is `FRONTEND_URL/?invite=<token>`: a signed token that expires after
 and stops working once the password is set. Errors: `invite_invalid`, `invite_expired`,
 `invite_used`, `weak_password`. On merge the host app's own invite flow replaces this.
 
+## Outreach (the Arival outreach tracker)
+
+Nothing here sends a message. People write drafts in Claude chat, paste them in, an approver approves,
+and someone sends by hand and ticks Sent. Every rule below is enforced on the server.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/outreach/?campaign=` | | people on outreach lists, with research, drafts, `next`, `last_touch`, `follow_up_due` |
+| POST | `/outreach/import/` (admin) | `{campaign, contacts[], research[]}` | counts; one deal per company, re-import updates |
+| PATCH | `/outreach/contacts/{id}/` | `priority` (admin), `email`, `linkedin`, `notes`, `verify{company,person,contact_info}` | the person |
+| POST | `/outreach/contacts/{id}/step/` | `{step, value}` (date, `""` unticks) | the person |
+| POST | `/outreach/contacts/{id}/reply-check/` | `{channel: linkedin|email|app, replied}` | the person |
+| PATCH | `/outreach/companies/{id}/research/` | `{research{}, website, verified}` | everyone listed at that company |
+| POST | `/outreach/contacts/{id}/drafts/` | `{channel, subject, body}` | the person |
+| PATCH | `/outreach/drafts/{id}/` | `subject`, `body`, `action: approve|changes`, `note` | the person |
+| DELETE | `/outreach/drafts/{id}/` | | the person |
+| PATCH | `/users/{id}/` (admin) | `{can_approve_outreach}` | the user |
+
+Rules: drafts and sent ticks need the company research and the person checked; sent ticks need an
+approved draft of that channel; P1 people only by `settings.outreach.p1_user_id` (who may skip drafts);
+"Yes" lead-review people are approved only by the P1 owner; nobody approves their own draft (admins
+excepted); one Arival app sender per person; Skip, competitors and unsubscribed are never messaged.
+Changing a required research field or the person's email/LinkedIn undoes the check.
+
 ## AI drafts (`/deals/{id}/ai-draft/`)
 
 The server builds the prompt from the deal (the fields, the last 8 notes and the

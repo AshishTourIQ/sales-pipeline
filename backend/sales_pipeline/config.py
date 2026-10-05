@@ -102,6 +102,8 @@ SOURCES: dict[str, str] = {
     "Comparative analysis": "s5",
     "Audit": "s5",
     "Event booth": "s5",
+    # "Request an account" inside Peek (intake key "Peek app"); company platform is Peek Pro
+    "Peek app": "s5",
 }
 # Met in person at a stand; the event itself is Deal.event ("Arival 2026", "Spark 2026", ...)
 BOOTH_SOURCES = {"Arival booth", "Spark booth", "Event booth"}
@@ -116,7 +118,9 @@ SEGMENTS = ["Water / boat", "Adventure", "Food / walking / city", "Attractions /
 PLATFORMS = ["FareHarbor", "Peek Pro", "Ventrata", "Rezdy", "Xola", "Checkfront", "Bókun", "Other / unknown"]
 LOSS_REASONS = ["Price", "Timing", "Wrong platform", "Chose a competitor", "No reply", "No budget", "Unsubscribed", "Not a prospect", "Other"]
 # No "worth re-engaging?" review for these
-NO_REVIEW_LOSS_REASONS = {"Unsubscribed", "Not a prospect"}
+# Set only by the system (an intake withdraw), never offered in the Lost dialog
+SYSTEM_LOSS_REASONS = ["Deleted in Peek"]
+NO_REVIEW_LOSS_REASONS = {"Unsubscribed", "Not a prospect", "Deleted in Peek"}
 NURTURE_REASONS = ["Not now", "No reply after the sequence", "Unsupported platform", "Not a water operator yet", "No-show twice",
                    "Partner hand-off", "Press hand-off", "Other"]
 PAY_STATUS = ["Not invoiced", "Invoiced", "Paid", "Late"]
@@ -255,3 +259,44 @@ BOOTH_FOLLOWUP_DEFAULTS: dict[str, tuple[str, int]] = {
     "A": ("nikunj", 0), "B": ("manjit", 2), "C": ("manjit", 3), "D": ("param", 7), "partner": ("nikunj", 3), "press": ("param", 3),
 }
 
+
+# ---------- Outreach (the Arival outreach tracker) ----------
+# Steps a person ticks with a date, in the tracker's column order. Channel = which column group.
+OUTREACH_STEPS: dict[str, tuple[str, str]] = {
+    "li_note": ("linkedin", "Connection note sent"),
+    "li_msg": ("linkedin", "Message sent"),
+    "li_reply": ("linkedin", "Reply received"),
+    "li_demo": ("linkedin", "Demo set"),
+    "em_draft": ("email", "Email drafted"),
+    "em_sent": ("email", "Email sent"),
+    "em_follow": ("email", "Follow-up sent"),
+    "em_reply": ("email", "Reply received"),
+    "app_sent": ("app", "Arival app message sent"),
+    "app_reply": ("app", "Arival app reply"),
+    "cal_demo": ("calendar", "Demo booked (TourIQ calendar)"),
+    "arival_meeting": ("calendar", "Arival meeting"),
+}
+# Ticking these needs an approved draft of this channel (the P1 owner may skip drafts)
+OUTREACH_SEND_STEPS = {"li_note": "li_note", "li_msg": "li_msg", "em_sent": "email", "em_follow": "email_follow", "app_sent": "app"}
+OUTREACH_PRIORITIES = ["P1", "P2", "P3", "P4", "Review", "Skip"]
+# Never messaged: duplicates, competitors
+OUTREACH_NO_CONTACT = {"Skip"}
+# Checks before any draft (per person); the company's research must be verified too
+OUTREACH_VERIFY = {
+    "company": "It's the right company (name and website match)",
+    "person": "The person works there in this role (LinkedIn or the company site)",
+    "contact_info": "Email and LinkedIn are theirs, not a shared inbox",
+}
+# Research needed before the company counts as verified
+OUTREACH_RESEARCH_REQUIRED = ["booking_platform", "example_tour", "listed_price", "sources"]
+OUTREACH_RESEARCH_FIELDS = OUTREACH_RESEARCH_REQUIRED + ["price_variation", "demand_language", "size", "unverified", "notes"]
+# No LinkedIn reply after this many days → send the email
+LINKEDIN_TO_EMAIL_DAYS = 2
+# No email reply after this many days → send the follow-up (the tracker's own rule)
+EMAIL_FOLLOW_UP_DAYS = 7
+# Arival tracker "Segment" → company category (and so which pipeline the company lands in)
+ARIVAL_SEGMENTS = {
+    "tour / activity operator": "operator", "attraction operator": "operator",
+    "booking platform / connectivity": "booking_platform", "ota / distribution": "ota",
+    "marketing / agency": "agency", "other technology": "agency",
+}

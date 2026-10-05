@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from ..config import (
     ACTIVITY_CAP, ATTENDED_TYPES, BOOTH_SOURCES, CALL_TYPES, CATEGORIES, CATEGORY_TEMPLATE, DEAL_LINKS_MAX, INTERESTS,
-    LOSS_REASONS,
+    LOSS_REASONS, SYSTEM_LOSS_REASONS,
 )
 from ..models import Activity, Company, Contact, Deal, Pipeline, StageHistory, StageTaskTemplate, Task
 from . import stages
@@ -220,7 +220,7 @@ def move_deal(tenant_id, deal_id, actor: Actor, data: dict) -> DealResult:
     loss_reason = data.get("loss_reason") or ""
     if to == "lost" and not loss_reason:
         raise ServiceError("A loss reason is required.", code="loss_reason_required")
-    if loss_reason and loss_reason not in LOSS_REASONS:
+    if loss_reason and loss_reason not in LOSS_REASONS and not (data.get("system") and loss_reason in SYSTEM_LOSS_REASONS):
         raise ServiceError("Unknown loss reason.", code="invalid_loss_reason")
 
     frm = deal.stage

@@ -145,3 +145,99 @@ def test_trade_show_is_stored_as_the_deal_event(admin_api, ws):
     # Without it the tool event kind is never stored as the trade show
     r = post(make_key(admin_api, "Audit"), {"event": "audit_submitted", "contact": {"email": "new@lead.test"}})
     assert Deal.objects.get(id=r.data["deal_id"]).event == ""
+
+
+# ---------- Peek account requests ----------
+
+PEEK = {"event": "demo_requested", "event_id": "peek-lead-1", "source": "Peek app",
+        "detail": "Requested from inside Peek. Peek account: Sea Kayak Co.",
+        "contact": {"name": "Lia Wave", "email": "lia@seakayak.test", "phone": "+1 415-555-0132"},
+        "company": {"name": "Sea Kayak Co", "website": "seakayak.test"}}
+
+
+def withdraw(key, ref="peek-lead-1", event_id="peek-lead-1:withdrawn"):
+    return post(key, {"event": "lead_withdrawn", "event_id": event_id, "ref_event_id": ref})
+
+
+def test_peek_request_lands_in_replied_as_account_request(admin_api, ws):
+    r = post(make_key(admin_api, "Peek app"), PEEK)
+    assert r.status_code == 201, r.data
+    d = Deal.objects.get(id=r.data["deal_id"])
+    assert (d.stage, d.source, d.company.platform, d.contact.phone) == ("s5", "Peek app", "Peek Pro", "+1 415-555-0132")
+    tp = Touchpoint.objects.get(deal=d)
+    assert (tp.kind, tp.external_id) == ("account_requested", "peek-lead-1")
+    assert tp.detail.startswith("Requested from inside Peek")
+
+
+def test_unknown_source_rejected(admin_api, ws):
+    r = post(make_key(admin_api), PEEK | {"source": "Peek"})
+    assert r.status_code == 400 and r.data["code"] == "invalid"
+
+
+def test_without_source_demo_request_still_goes_to_demo_booked(admin_api, ws):
+    r = post(make_key(admin_api), PEEK | {"source": ""})
+    assert r.data["stage"] == "s6"
+    assert Touchpoint.objects.get(deal_id=r.data["deal_id"]).kind == "demo_requested"
+
+
+def test_peek_request_moves_existing_deal_up_to_replied_only(api, admin_api, ws):
+    d = new_deal(api, ws, entry_stage="s3")["deal"]
+    key = make_key(admin_api, "Peek app")
+    post(key, PEEK | {"contact": {"email": "jo@example.com"}})
+    deal = Deal.objects.get(id=d["id"])
+    assert deal.stage == "s5"
+    assert deal.company.platform == "FareHarbor"  # filled only when empty
+    Deal.objects.filter(id=d["id"]).update(stage="s7")
+    post(key, PEEK | {"event_id": "peek-lead-2", "contact": {"email": "jo@example.com"}})
+    assert Deal.objects.get(id=d["id"]).stage == "s7"
+
+
+def test_withdraw_early_deal_goes_to_lost_without_review(admin_api, ws):
+    key = make_key(admin_api, "Peek app")
+    deal_id = post(key, PEEK).data["deal_id"]
+    r = withdraw(key)
+    assert r.status_code == 200 and r.data["stage"] == "lost"
+    d = Deal.objects.get(id=deal_id)
+    assert d.loss_reason == "Deleted in Peek"
+    assert not d.tasks.filter(title="Review: worth re-engaging?").exists()
+    assert d.touchpoints.filter(kind="lead_withdrawn").count() == 1
+    again = withdraw(key)
+    assert again.data["duplicate"] is True and d.touchpoints.filter(kind="lead_withdrawn").count() == 1
+
+
+def test_withdraw_late_deal_stays_and_owner_gets_task(admin_api, ws):
+    key = make_key(admin_api, "Peek app")
+    deal_id = post(key, PEEK).data["deal_id"]
+    Deal.objects.filter(id=deal_id).update(stage="s7")
+    r = withdraw(key)
+    assert r.status_code == 200 and r.data["stage"] == "s7"
+    d = Deal.objects.get(id=deal_id)
+    t = d.tasks.get(title="Deleted in Peek: keep this deal or move it to Lost?")
+    assert t.owner_id == d.owner_id and not t.blocking
+    assert any("Kept here" in a.text for a in d.activities.all())
+
+
+def test_withdraw_needs_a_known_lead(admin_api, ws):
+    key = make_key(admin_api, "Peek app")
+    r = withdraw(key, ref="nope")
+    assert r.status_code == 404 and r.data["code"] == "lead_not_found"
+    r = post(key, {"event": "lead_withdrawn", "event_id": "x"})
+    assert r.status_code == 400
+
+
+def test_deleted_in_peek_is_system_only(api, admin_api, ws):
+    d = new_deal(api, ws)["deal"]
+    r = api.post(f"/api/sales-pipeline/deals/{d['id']}/move/", {"to": "lost", "loss_reason": "Deleted in Peek"}, format="json")
+    assert r.status_code == 400
+    r = api.post(f"/api/sales-pipeline/deals/{d['id']}/touchpoints/", {"kind": "lead_withdrawn"}, format="json")
+    assert r.status_code == 400
+
+
+def test_proxy_count_takes_the_real_caller_address(settings):
+    from rest_framework.test import APIRequestFactory
+
+    from sales_pipeline.api.views import IntakeIPThrottle
+    settings.REST_FRAMEWORK = {**settings.REST_FRAMEWORK, "NUM_PROXIES": 1}
+    # Through the tunnel: Cloudflare appends the caller; Next passes the header on unchanged. "6.6.6.6" was written by the caller
+    req = APIRequestFactory().post(URL, HTTP_X_FORWARDED_FOR="6.6.6.6,203.0.113.9", REMOTE_ADDR="127.0.0.1")
+    assert IntakeIPThrottle().get_ident(req) == "203.0.113.9"

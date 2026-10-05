@@ -18,6 +18,7 @@ import { SubTabs } from "./shell/SubTabs";
 import { Toolbar } from "./shell/Toolbar";
 import { DashboardView } from "./views/DashboardView";
 import { GuideView } from "./views/GuideView";
+import { OutreachView } from "./views/OutreachView";
 import { SettingsView } from "./views/SettingsView";
 import { TasksView } from "./views/TasksView";
 
@@ -72,6 +73,7 @@ export function SalesPipelineApp({ className }: { className?: string }) {
   else if (!pipeline) body = <Setup />;
   else if (ui.view === "board") body = phone ? <MobileStageList /> : ui.layout === "list" ? <ListView /> : <BoardView />;
   else if (ui.view === "tasks") body = <TasksView />;
+  else if (ui.view === "outreach") body = <OutreachView />;
   else if (ui.view === "dash") body = <DashboardView />;
   else if (ui.view === "guide") body = <GuideView />;
   else body = <SettingsView />;

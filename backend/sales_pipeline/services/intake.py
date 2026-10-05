@@ -10,6 +10,14 @@ domain, then company name; if nothing matches, a company, contact and deal are c
 at "Offer sent" on the event's track (a demo request starts at Demo booked). A deal still
 before "Offer sent" moves there; a demo request moves it to Demo booked. The same
 event_id twice is recorded once.
+
+A demo request that names its source starts at (or moves up to) that source's entry stage
+instead: "Peek app" account requests land in Replied, logged as "Requested an account", with
+the company's platform set to Peek Pro when empty.
+
+lead_withdrawn (ref_event_id = the lead's first event_id): a deal still at or before Replied
+moves to Lost, "Deleted in Peek"; a deal the team has taken further stays put and its owner
+gets a task to decide.
 """
 import hashlib
 import re
@@ -26,7 +34,7 @@ from core.tenancy import set_current_tenant
 
 from ..models import Company, Contact, Deal, IntakeKey, Pipeline, Touchpoint
 from . import stages, touchpoints
-from .deals import Actor, create_deal, move_deal
+from .deals import Actor, _task, add_activity, create_deal, move_deal
 from .errors import ServiceError
 from .pipelines import stage_def, stage_enabled
 
@@ -38,7 +46,12 @@ EVENTS = {
     "audit_submitted": ("audit_submitted", "Audit", "audit"),
     "audit_report_sent": ("audit_report_sent", "Audit", "audit"),
     "demo_requested": ("demo_requested", "Inbound (website, video)", ""),
+    "lead_withdrawn": ("lead_withdrawn", "", ""),
 }
+# Demo requests from these sources are logged as their own step, and fill the company's platform
+SOURCE_KIND = {"Peek app": "account_requested"}
+SOURCE_PLATFORM = {"Peek app": "Peek Pro"}
+WITHDRAWN_REASON = "Deleted in Peek"
 PREFIX = "spk"
 
 
@@ -136,6 +149,11 @@ def handle_event(key: IntakeKey, data: dict) -> IntakeResult:
         dup = Touchpoint.objects.filter(tenant_id=tenant_id, external_id=event_id).select_related("deal").first()
         if dup:
             return IntakeResult(dup.deal, dup, created=False, duplicate=True)
+    if data["event"] == "lead_withdrawn":
+        return _withdraw(tenant_id, key, actor, data, event_id)
+    source_in = data.get("source") or ""
+    if data["event"] == "demo_requested" and source_in in SOURCE_KIND:
+        kind = SOURCE_KIND[source_in]
 
     if data.get("pipeline_id"):
         pipeline = Pipeline.objects.filter(tenant_id=tenant_id, id=data["pipeline_id"]).first()
@@ -160,9 +178,9 @@ def handle_event(key: IntakeKey, data: dict) -> IntakeResult:
         name = (co_in.get("name") or "").strip() or (company.name if company else "") or (email.split("@")[-1] if email else "")
         if not name:
             raise ServiceError("Send the company name or the contact's email.", code="company_required")
-        entry = stages.resolve(pipeline, "s6") if not track else ("offer" if stage_enabled(pipeline, "offer") else stages.entry_for_source(pipeline, source))
+        entry = _demo_entry(pipeline, source_in) if not track else ("offer" if stage_enabled(pipeline, "offer") else stages.entry_for_source(pipeline, source))
         result = create_deal(tenant_id, actor, {
-            "pipeline_id": pipeline.id, "entry_stage": entry, "source": data.get("source") or source, "event": data.get("trade_show") or "",
+            "pipeline_id": pipeline.id, "entry_stage": entry, "source": source_in or source, "event": data.get("trade_show") or "",
             "owner_id": stage_def(pipeline, entry).owner_id, "track": track,
             "company": {"name": name, "website": (co_in.get("website") or "").strip()},
             # A known contact is re-used below instead of creating a second one
@@ -181,6 +199,9 @@ def handle_event(key: IntakeKey, data: dict) -> IntakeResult:
         if co_in.get("website") and not deal.company.website:
             Company.objects.filter(id=deal.company_id).update(website=co_in["website"].strip()[:300])
 
+    if SOURCE_PLATFORM.get(source_in):
+        Company.objects.filter(id=deal.company_id, platform="").update(platform=SOURCE_PLATFORM[source_in])
+
     tp = touchpoints.record(deal, kind, actor, source="intake", at=data.get("occurred_at"), score=str(data.get("score") or ""),
                             link=data.get("link") or "", detail=data.get("detail") or "", external_id=event_id)
 
@@ -193,9 +214,9 @@ def handle_event(key: IntakeKey, data: dict) -> IntakeResult:
             here = -1
         target = ""
         if not track:
-            s6 = stages.resolve(pipeline, "s6")
-            if s6 in route and here < route.index(s6):
-                target = s6
+            entry = _demo_entry(pipeline, source_in)
+            if entry in route and here < route.index(entry):
+                target = entry
         elif "offer" in route and here < route.index("offer"):
             target = "offer"
         if target:
@@ -205,3 +226,33 @@ def handle_event(key: IntakeKey, data: dict) -> IntakeResult:
         elif track and not deal.track and deal.stage == "offer":
             Deal.objects.filter(id=deal.id).update(track=track)
     return IntakeResult(deal, tp, created=created)
+
+
+def _demo_entry(pipeline: Pipeline, source: str) -> str:
+    """Where a demo request lands: its source's entry stage when one is named, else Demo booked."""
+    return stages.entry_for_source(pipeline, source) if source else stages.resolve(pipeline, "s6")
+
+
+def _withdraw(tenant_id, key: IntakeKey, actor: Actor, data: dict, event_id: str) -> IntakeResult:
+    """The tool deleted the lead on its side. Early deals go to Lost; ones the team has worked on stay for a person to decide."""
+    first = (Touchpoint.objects.filter(tenant_id=tenant_id, external_id=data["ref_event_id"].strip())
+             .select_related("deal__pipeline").first())
+    if first is None:
+        raise ServiceError("No lead was sent with that ref_event_id.", code="lead_not_found", status=404)
+    deal = first.deal
+    tp = touchpoints.record(deal, "lead_withdrawn", actor, source="intake", at=data.get("occurred_at"),
+                            detail=data.get("detail") or "", external_id=event_id)
+    if deal.stage == "lost":
+        return IntakeResult(deal, tp, created=False)
+    pipeline = deal.pipeline
+    here, replied = stages.index_of(pipeline, deal.stage), stages.index_of(pipeline, stages.resolve(pipeline, "s5"))
+    if deal.stage == "nurture" or here <= replied:
+        move_deal(tenant_id, deal.id, actor, {"to": "lost", "loss_reason": WITHDRAWN_REASON, "system": True,
+                                              "note": f"{WITHDRAWN_REASON} ({key.name})."})
+        deal.refresh_from_db()
+    else:
+        add_activity(deal, "note", f"{WITHDRAWN_REASON} ({key.name}). Kept here because the team has taken it past Replied.",
+                     actor, touch=False)
+        _task(deal, f"{WITHDRAWN_REASON}: keep this deal or move it to Lost?", deal.owner, timezone.localdate(), actor,
+              auto=True, blocking=False)
+    return IntakeResult(deal, tp, created=False)

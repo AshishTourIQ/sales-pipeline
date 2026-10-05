@@ -223,8 +223,7 @@ export function writeXlsx(sheets: XlsxSheet[]): Blob {
   return new Blob([zip(files)], { type: `${OX}.sheet` });
 }
 
-/** Rows of the sheet named "Lead Tracker", else the first sheet with a "Company" cell, else the first sheet. */
-export async function readXlsx(buf: ArrayBuffer): Promise<string[][]> {
+async function openWorkbook(buf: ArrayBuffer) {
   const zip = zipEntries(buf);
   const get = async (name: string) => {
     const e = zip.get(name);
@@ -248,6 +247,20 @@ export async function readXlsx(buf: ArrayBuffer): Promise<string[][]> {
     const s = await get(path);
     return s ? sheetRows(xml(s), shared, date1904) : [];
   };
+  return { sheets, load };
+}
+
+/** Every sheet's rows, by sheet name (the outreach tracker has several tabs). */
+export async function readXlsxSheets(buf: ArrayBuffer): Promise<Map<string, string[][]>> {
+  const { sheets, load } = await openWorkbook(buf);
+  const out = new Map<string, string[][]>();
+  for (const s of sheets) out.set(s.name, await load(s.path));
+  return out;
+}
+
+/** Rows of the sheet named "Lead Tracker", else the first sheet with a "Company" cell, else the first sheet. */
+export async function readXlsx(buf: ArrayBuffer): Promise<string[][]> {
+  const { sheets, load } = await openWorkbook(buf);
   const hasCompany = (rows: string[][]) => rows.some((r) => r.some((c) => c.trim().toLowerCase() === "company"));
 
   const named = sheets.find((s) => /lead\s*tracker/i.test(s.name));

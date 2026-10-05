@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { StageKey } from "../types";
 
-export type View = "board" | "tasks" | "dash" | "guide" | "settings";
+export type View = "board" | "tasks" | "outreach" | "dash" | "guide" | "settings";
 export type DrawerTab = "overview" | "tasks" | "activity" | "ai" | "guide";
 export type Layout = "board" | "list";
 
@@ -31,7 +31,7 @@ interface Persisted {
 
 const DEFAULTS: Persisted = {
   view: "board",
-  sub: { board: "find", tasks: "due", dash: "score", guide: "find", settings: "profile" },
+  sub: { board: "find", tasks: "due", outreach: "today", dash: "score", guide: "find", settings: "profile" },
   layout: "board",
   pipelineId: "touriq",
   meId: "",

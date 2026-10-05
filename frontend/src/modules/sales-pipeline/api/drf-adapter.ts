@@ -30,6 +30,8 @@ const toCamel = (s: string) => s.replace(/_([a-z0-9])/g, (_m, c: string) => c.to
 /** Keys whose object values are maps keyed by data (stage keys, rule keys, checklist keys), not field names. */
 const OPAQUE_KEYS = new Set([
   "stages", "rules", "targets", "qual", "pilotChecks", "onboarding", "pilot_checks", "answers", "boothFollowup", "booth_followup", "eventCosts", "event_costs",
+  // Outreach maps keyed by step / check / research field / channel
+  "steps", "verify", "research", "replyChecked", "reply_checked",
 ]);
 
 function convertKeys(v: unknown, fn: (s: string) => string, opaque = false): unknown {
@@ -155,6 +157,17 @@ export function createDrfApi(opts: DrfApiOptions): PipelineApi {
     importLeads: (pipelineId, rows) => req("POST", `/pipelines/${q(pipelineId)}/import/`, { rows }),
     loadSamples: (pipelineId) => req("POST", `/pipelines/${q(pipelineId)}/samples/`, {}),
     removeSamples: (pipelineId) => req("DELETE", `/pipelines/${q(pipelineId)}/samples/`),
+
+    setApprover: (userId, canApprove) => req("PATCH", `/users/${q(userId)}/`, { canApproveOutreach: canApprove }),
+    listOutreach: (campaign = "") => req("GET", `/outreach/?campaign=${q(campaign)}`),
+    importOutreach: (input) => req("POST", "/outreach/import/", input),
+    updateOutreachContact: (id, patch) => req("PATCH", `/outreach/contacts/${q(id)}/`, patch),
+    setOutreachStep: (id, step, value) => req("POST", `/outreach/contacts/${q(id)}/step/`, { step, value }),
+    answerReplyCheck: (id, channel, replied) => req("POST", `/outreach/contacts/${q(id)}/reply-check/`, { channel, replied }),
+    updateResearch: (companyId, patch) => req("PATCH", `/outreach/companies/${q(companyId)}/research/`, patch),
+    saveDraft: (contactId, input) => req("POST", `/outreach/contacts/${q(contactId)}/drafts/`, input),
+    reviewDraft: (draftId, patch) => req("PATCH", `/outreach/drafts/${q(draftId)}/`, patch),
+    deleteDraft: (draftId) => req("DELETE", `/outreach/drafts/${q(draftId)}/`),
 
     aiDraft: (dealId, input, signal) => req("POST", `/deals/${q(dealId)}/ai-draft/`, input, signal),
   };

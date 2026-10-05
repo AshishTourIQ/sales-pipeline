@@ -6,7 +6,7 @@ from datetime import datetime
 
 from rest_framework import serializers
 
-from ..config import ACTIVITY_TYPES, BOOTH_SOURCES, INTERESTS, LOSS_REASONS, OFFERS, PAY_STATUS, VISITOR_TYPES
+from ..config import ACTIVITY_TYPES, BOOTH_SOURCES, INTERESTS, LOSS_REASONS, OFFERS, PAY_STATUS, SOURCES, VISITOR_TYPES
 from ..models import Deal, Pipeline, Task
 from ..services import stages as stage_list
 from ..config import CALL_TYPES, CATEGORIES, TEMPLATES, TRACKS
@@ -356,6 +356,8 @@ class StageRemoveIn(serializers.Serializer):
 
 class SettingsIn(serializers.Serializer):
     team = serializers.ListField(child=serializers.DictField(), required=False)
+    # {"p1_user_id": "...", "app_sender_ids": [...]}: who alone messages P1 contacts; who sends Arival app messages
+    outreach = serializers.DictField(required=False)
     rules = serializers.DictField(child=serializers.BooleanField(), required=False)
     targets = serializers.DictField(required=False)
     booth_followup = serializers.DictField(child=serializers.DictField(), required=False)
@@ -366,7 +368,8 @@ class SettingsIn(serializers.Serializer):
 
 
 class TouchpointIn(serializers.Serializer):
-    kind = serializers.ChoiceField(choices=[k for k, _ in Touchpoint.KINDS])
+    # "Deleted in Peek" is only ever recorded by the intake withdraw
+    kind = serializers.ChoiceField(choices=[k for k, _ in Touchpoint.KINDS if k != "lead_withdrawn"])
     score = serializers.CharField(max_length=40, allow_blank=True, required=False, default="")
     link = serializers.URLField(max_length=600, allow_blank=True, required=False, default="")
     detail = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
@@ -399,8 +402,16 @@ class IntakeIn(serializers.Serializer):
     # New leads only: the trade show where the tool was used ("Arival 2026").
     # Not "event": that is the tool event kind above.
     trade_show = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
+    # Lead source for new leads ("Peek app"); also decides where a demo request lands
+    source = serializers.ChoiceField(choices=[*SOURCES, ""], required=False, default="")
+    # lead_withdrawn only: the event_id the lead was first sent with
+    ref_event_id = serializers.CharField(max_length=120, allow_blank=True, required=False, default="")
 
     def validate(self, attrs):
+        if attrs["event"] == "lead_withdrawn":
+            if not attrs["ref_event_id"].strip():
+                raise serializers.ValidationError({"ref_event_id": "Send the event_id the lead was first sent with."})
+            return attrs
         if not (attrs["contact"].get("email") or attrs["company"].get("name")):
             raise serializers.ValidationError({"detail": "Send contact.email or company.name so the lead can be matched."})
         return attrs
@@ -454,3 +465,90 @@ class AiDraftIn(serializers.Serializer):
     action = serializers.ChoiceField(choices=["brief", "first", "follow", "invite", "tag", "summary", "next"])
     option = serializers.CharField(max_length=10, allow_blank=True, required=False, default="")
     pasted = serializers.CharField(max_length=30000, allow_blank=True, required=False, default="")
+
+
+# ---------------- outreach ----------------
+
+def _uname(u) -> str:
+    return u.display_name if u else ""
+
+
+def draft_out(d) -> dict:
+    return {"id": str(d.id), "channel": d.channel, "subject": d.subject, "body": d.body, "status": d.status,
+            "review_note": d.review_note, "created_by_id": _s(d.created_by_id), "created_at": _d(d.created_at),
+            "approved_by_id": _s(d.approved_by_id), "approved_at": _d(d.approved_at),
+            "sent_by_id": _s(d.sent_by_id), "sent_at": _d(d.sent_at)}
+
+
+def outreach_contact_out(ct, deal: dict | None) -> dict:
+    from ..services import outreach as o
+    co = ct.company
+    drafts = sorted(ct.drafts.all(), key=lambda d: d.created_at)
+    lt, fu = o.last_touch(ct), o.follow_up_due(ct)
+    return {
+        "id": str(ct.id), "campaign": ct.campaign, "ext_id": ct.ext_id, "name": ct.name, "title": ct.title,
+        "email": ct.email, "linkedin": ct.linkedin, "country": ct.country, "priority": ct.priority,
+        "role_type": ct.role_type, "lead_review": ct.lead_review, "data_flags": ct.data_flags,
+        "steps": ct.steps or {}, "app_sender_id": _s(ct.app_sender_id), "app_sender_name": _uname(ct.app_sender),
+        "verify": ct.verify or {}, "verified_at": _d(ct.verified_at), "verified_by_name": _uname(ct.verified_by),
+        "reply_checked": ct.reply_checked or {}, "notes": ct.outreach_notes,
+        "do_not_contact": o.do_not_contact(ct),
+        "last_touch": _d(lt), "follow_up_due": _d(fu),
+        "next": o.next_action(ct, drafts),
+        "drafts": [draft_out(d) for d in drafts],
+        "company": {
+            "id": str(co.id), "name": co.name, "website": co.website, "category": co.category,
+            "research": co.research or {}, "research_verified_at": _d(co.research_verified_at),
+            "research_verified_by_name": _uname(co.research_verified_by),
+        },
+        "deal": {"id": str(deal["id"]), "pipeline_id": str(deal["pipeline_id"]), "stage": deal["stage"]} if deal else None,
+    }
+
+
+class OutreachContactIn(serializers.Serializer):
+    priority = serializers.CharField(max_length=8, required=False)
+    email = serializers.EmailField(allow_blank=True, required=False)
+    linkedin = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    title = serializers.CharField(max_length=200, allow_blank=True, required=False)
+    notes = serializers.CharField(max_length=5000, allow_blank=True, required=False)
+    verify = serializers.DictField(child=serializers.BooleanField(), required=False)
+
+
+class OutreachStepIn(serializers.Serializer):
+    step = serializers.CharField(max_length=20)
+    # "YYYY-MM-DD" (arival_meeting: "YYYY-MM-DDTHH:MM"); null or "" unticks
+    value = serializers.CharField(max_length=20, allow_blank=True, allow_null=True)
+
+
+class OutreachReplyIn(serializers.Serializer):
+    channel = serializers.ChoiceField(choices=["linkedin", "email", "app"])
+    replied = serializers.BooleanField()
+
+
+class OutreachResearchIn(serializers.Serializer):
+    research = serializers.DictField(child=serializers.CharField(max_length=2000, allow_blank=True), required=False)
+    website = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    verified = serializers.BooleanField(required=False, allow_null=True, default=None)
+
+
+class OutreachDraftIn(serializers.Serializer):
+    channel = serializers.CharField(max_length=16)
+    subject = serializers.CharField(max_length=300, allow_blank=True, required=False, default="")
+    body = serializers.CharField(max_length=10000, allow_blank=True)
+
+
+class OutreachReviewIn(serializers.Serializer):
+    subject = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    body = serializers.CharField(max_length=10000, allow_blank=True, required=False)
+    action = serializers.ChoiceField(choices=["approve", "changes"], required=False)
+    note = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+
+
+class OutreachImportIn(serializers.Serializer):
+    campaign = serializers.CharField(max_length=60)
+    contacts = serializers.ListField(child=serializers.DictField(), max_length=2000)
+    research = serializers.ListField(child=serializers.DictField(), max_length=2000, required=False, default=list)
+
+
+class UserPatchIn(serializers.Serializer):
+    can_approve_outreach = serializers.BooleanField(required=False)

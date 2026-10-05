@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Columns3, SlidersHorizontal, SquareCheckBig, Waypoints } from "lucide-react";
+import { BarChart3, Columns3, Send, SlidersHorizontal, SquareCheckBig, Waypoints } from "lucide-react";
 import type { ReactNode } from "react";
 import { useData } from "../../context/data-context";
 import { useModule } from "../../context/module-context";
@@ -11,6 +11,7 @@ import { Avatar } from "../common";
 const NAV: { view: View; label: ReactNode; icon: ReactNode }[] = [
   { view: "board", label: "Pipeline", icon: <Columns3 /> },
   { view: "tasks", label: "Tasks", icon: <SquareCheckBig /> },
+  { view: "outreach", label: "Outreach", icon: <Send /> },
   { view: "dash", label: "Dashboard", icon: <BarChart3 /> },
   { view: "guide", label: <>Workflow<span className="hidden desk:inline"> guide</span></>, icon: <Waypoints /> },
   { view: "settings", label: "Settings", icon: <SlidersHorizontal /> },

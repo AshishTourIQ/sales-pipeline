@@ -28,6 +28,7 @@ import { newId, nextStageOf, rawStages, stagesOf } from "../../lib/pipeline";
 import type { AccessRole, FollowupKey, PhaseKey, PipelineTemplate, StageConfig, StageEdit, StageKey } from "../../types";
 import { Avatar, CheckRow, Field, Grid, PHASE_COLOR, Dot } from "../common";
 import { ConfirmDialog } from "../dialogs/ConfirmDialog";
+import { OutreachSettings } from "./OutreachSettings";
 
 function Sec({ title, text, children }: { title: string; text?: ReactNode; children: ReactNode }) {
   return (
@@ -51,6 +52,7 @@ export function SettingsView() {
       {tab === "rules" && <RulesTab />}
       {tab === "targets" && <TargetsTab />}
       {tab === "booth" && <><BoothTab /><EventCostsSection /></>}
+      {tab === "outreach" && <OutreachSettings />}
       {tab === "integrations" && <IntegrationsTab />}
       {tab === "links" && <LinksTab />}
       {tab === "products" && <ProductsTab />}

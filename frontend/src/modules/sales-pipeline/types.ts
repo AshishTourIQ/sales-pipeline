@@ -97,7 +97,7 @@ export type Track = "game" | "analysis" | "audit";
 
 export type TouchpointKind =
   | "game_link_sent" | "game_played" | "analysis_requested" | "analysis_viewed" | "analysis_sent" | "audit_submitted" | "audit_report_sent"
-  | "demo_requested" | "demo_booked" | "demo_held";
+  | "demo_requested" | "account_requested" | "demo_booked" | "demo_held" | "lead_withdrawn";
 
 /** One step of a lead's journey toward a demo. */
 export interface Touchpoint {
@@ -407,6 +407,8 @@ export interface PipelineSettings {
   links: Partial<Record<LinkKey, string>>;
   /** What each event cost, by event name ("Arival 2026": 12000). In a patch, null removes an event. */
   eventCosts: Record<string, number | null>;
+  /** Outreach: who alone messages P1 contacts ("" = nobody set yet). Server only. */
+  outreach?: { p1UserId: string; appSenderIds?: string[] };
   /** Server only */
   integrations?: Integrations;
 }
@@ -544,6 +546,10 @@ export interface WorkspaceUser {
   role?: AccessRole;
   /** Invited but hasn't set a password yet */
   pending?: boolean;
+  /** Outreach: an admin made them an approver */
+  canApproveOutreach?: boolean;
+  /** Approver or admin */
+  canApprove?: boolean;
 }
 
 export interface InviteInput {
@@ -570,4 +576,121 @@ export interface DuplicateMatch {
   stageName: string;
   ownerId: string;
   match: "email" | "website" | "company";
+}
+
+/* ---------- Outreach (the Arival outreach tracker) ---------- */
+
+export type OutreachStep =
+  | "li_note" | "li_msg" | "li_reply" | "li_demo"
+  | "em_draft" | "em_sent" | "em_follow" | "em_reply"
+  | "app_sent" | "app_reply" | "cal_demo" | "arival_meeting";
+export type DraftChannel = "li_note" | "li_msg" | "email" | "email_follow" | "app";
+export type DraftStatus = "pending" | "changes" | "approved" | "sent";
+export type ReplyChannel = "linkedin" | "email" | "app";
+export type OutreachPriority = "P1" | "P2" | "P3" | "P4" | "Review" | "Skip";
+export type VerifyKey = "company" | "person" | "contact_info";
+export type ResearchKey =
+  | "booking_platform" | "example_tour" | "listed_price" | "sources"
+  | "price_variation" | "demand_language" | "size" | "unverified" | "notes";
+
+export interface OutreachDraft {
+  id: string;
+  channel: DraftChannel;
+  subject: string;
+  body: string;
+  status: DraftStatus;
+  reviewNote: string;
+  createdById: string;
+  createdAt: string;
+  approvedById: string;
+  approvedAt: string;
+  sentById: string;
+  sentAt: string;
+}
+
+export interface NextAction {
+  key: "none" | "done" | "book" | "verify" | "send" | "fix" | "approval" | "follow" | "ask_email" | "wait"
+    | "email" | "ask_linkedin" | "ask_app" | "li_msg" | "write";
+  label: string;
+  due: string | null;
+}
+
+export interface OutreachContact {
+  id: string;
+  campaign: string;
+  extId: string;
+  name: string;
+  title: string;
+  email: string;
+  linkedin: string;
+  country: string;
+  priority: OutreachPriority | "";
+  roleType: string;
+  /** "Yes" = the P1 owner approves this person's drafts */
+  leadReview: string;
+  dataFlags: string;
+  /** Step → "YYYY-MM-DD" ("arival_meeting": "YYYY-MM-DDTHH:MM") */
+  steps: Partial<Record<OutreachStep, string>>;
+  appSenderId: string;
+  appSenderName: string;
+  verify: Partial<Record<VerifyKey, boolean>>;
+  verifiedAt: string;
+  verifiedByName: string;
+  replyChecked: Partial<Record<ReplyChannel, string>>;
+  notes: string;
+  /** Why this person is never messaged ("" = they can be) */
+  doNotContact: string;
+  lastTouch: string;
+  followUpDue: string;
+  next: NextAction;
+  drafts: OutreachDraft[];
+  company: {
+    id: string;
+    name: string;
+    website: string;
+    category: string;
+    research: Partial<Record<ResearchKey, string>>;
+    researchVerifiedAt: string;
+    researchVerifiedByName: string;
+  };
+  deal: { id: string; pipelineId: string; stage: StageKey } | null;
+}
+
+export interface OutreachImportRow {
+  extId: string;
+  name: string;
+  title: string;
+  email: string;
+  country: string;
+  company: string;
+  segment: string;
+  priority: string;
+  roleType: string;
+  competitor: string;
+  leadReview: string;
+  flags: string;
+  notes: string;
+  steps: Partial<Record<OutreachStep, string>>;
+  /** Who already sent the Arival app message (a tracker column name: Nikunj, Gunin, Barkley) */
+  appSender: string;
+}
+export interface OutreachResearchRow {
+  company: string;
+  website: string;
+  competitor: string;
+  bookingPlatform: string;
+  exampleTour: string;
+  listedPrice: string;
+  priceVariation: string;
+  demandLanguage: string;
+  size: string;
+  sources: string;
+  unverified: string;
+}
+export interface OutreachImportResult {
+  companiesCreated: number;
+  dealsCreated: number;
+  contactsCreated: number;
+  contactsUpdated: number;
+  skipped: number;
 }

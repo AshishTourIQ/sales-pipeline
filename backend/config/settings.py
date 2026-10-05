@@ -99,6 +99,9 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
     "EXCEPTION_HANDLER": "sales_pipeline.api.exceptions.exception_handler",
+    # Proxies in front of Django that append to X-Forwarded-For. Rate limits and the wrong-key block count
+    # the address just before them; unset, the whole (caller-written) header is the address.
+    "NUM_PROXIES": env.int("DRF_NUM_PROXIES", default=None),
 }
 
 SIMPLE_JWT = {

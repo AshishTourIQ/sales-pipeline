@@ -46,6 +46,8 @@ class User(AbstractUser):
     pipeline_role = models.CharField(max_length=20, choices=PipelineRole.choices, default=PipelineRole.NONE)
     # Shown in owner pickers and as a stage owner
     is_sales_team = models.BooleanField(default=False)
+    # Outreach: may approve drafts before they're sent (admins always can). Set by an admin.
+    can_approve_outreach = models.BooleanField(default=False)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]
@@ -67,3 +69,7 @@ class User(AbstractUser):
     def can_admin_pipeline(self) -> bool:
         """Pipeline set-up (settings, team, stages, pipelines, import, samples, stage tasks) is admin-only."""
         return self.tenant_id is not None and self.pipeline_role == PipelineRole.ADMIN
+
+    @property
+    def can_approve(self) -> bool:
+        return self.can_admin_pipeline or (self.can_write_pipeline and self.can_approve_outreach)

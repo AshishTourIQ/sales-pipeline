@@ -33,6 +33,7 @@ from ..services import duplicates as dup_svc
 from ..services import speed as speed_svc
 from ..services import deals as deal_svc
 from ..services import importer, samples, stage_tasks
+from ..services import outreach as outreach_svc
 from ..services import stages as stage_svc
 from ..config import CHECKLISTS
 from ..models import StageTaskTemplate
@@ -452,9 +453,26 @@ class UserResendInviteView(TenantScopedMixin, APIView):
         return Response({**_user_out(u), "email_sent": sent})
 
 
+class UserDetailView(TenantScopedMixin, APIView):
+    """Admin: make someone an outreach approver (or not)."""
+
+    admin_methods = WRITES
+
+    def patch(self, request: Request, pk) -> Response:
+        u = User.objects.filter(tenant_id=self.tenant_id, id=pk, is_active=True).first()
+        if u is None:
+            raise ServiceError("Person not found.", code="not_found", status=404)
+        data = _valid(S.UserPatchIn, request.data, partial=True)
+        if "can_approve_outreach" in data:
+            u.can_approve_outreach = data["can_approve_outreach"]
+            u.save(update_fields=["can_approve_outreach"])
+        return Response(_user_out(u))
+
+
 def _user_out(u) -> dict:
     return {"id": str(u.id), "name": u.display_name, "email": u.email, "is_sales_team": u.is_sales_team,
-            "role": u.pipeline_role, "pending": invites.is_pending(u)}
+            "role": u.pipeline_role, "pending": invites.is_pending(u),
+            "can_approve_outreach": u.can_approve_outreach, "can_approve": u.can_approve}
 
 
 # ---------------- intake (game, analysis, audit tools) ----------------
@@ -628,6 +646,78 @@ class RecordingDismissView(TenantScopedMixin, APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# ---------------- outreach ----------------
+
+def _outreach_rows(tenant_id, contacts) -> list[dict]:
+    contacts = list(contacts)
+    deals = outreach_svc.deals_by_company(tenant_id, {c.company_id for c in contacts})
+    return [S.outreach_contact_out(c, deals.get(c.company_id)) for c in contacts]
+
+
+class OutreachListView(TenantScopedMixin, APIView):
+    """Everyone on an outreach list (the tracker's Contacts tab), with research, drafts and the next step."""
+
+    def get(self, request: Request) -> Response:
+        campaign = request.query_params.get("campaign", "")
+        return Response(_outreach_rows(self.tenant_id, outreach_svc.list_contacts(self.tenant_id, campaign)))
+
+
+class OutreachImportView(TenantScopedMixin, APIView):
+    admin_methods = WRITES
+
+    def post(self, request: Request) -> Response:
+        data = _valid(S.OutreachImportIn, request.data)
+        return Response(outreach_svc.import_tracker(self.tenant_id, self.actor, data["campaign"], data["contacts"], data["research"]))
+
+
+class _OutreachContactMixin(TenantScopedMixin):
+    def _one(self, ct) -> Response:
+        ct = outreach_svc.list_contacts(self.tenant_id).get(id=ct.id)
+        return Response(_outreach_rows(self.tenant_id, [ct])[0])
+
+
+class OutreachContactView(_OutreachContactMixin, APIView):
+    def patch(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachContactIn, request.data, partial=True)
+        return self._one(outreach_svc.update_contact(self.tenant_id, self.actor, pk, data))
+
+
+class OutreachStepView(_OutreachContactMixin, APIView):
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachStepIn, request.data)
+        return self._one(outreach_svc.set_step(self.tenant_id, self.actor, pk, data["step"], data["value"]))
+
+
+class OutreachReplyView(_OutreachContactMixin, APIView):
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachReplyIn, request.data)
+        return self._one(outreach_svc.answer_reply_check(self.tenant_id, self.actor, pk, data["channel"], data["replied"]))
+
+
+class OutreachDraftCreateView(_OutreachContactMixin, APIView):
+    def post(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachDraftIn, request.data)
+        return self._one(outreach_svc.save_draft(self.tenant_id, self.actor, pk, data["channel"], data["subject"], data["body"]))
+
+
+class OutreachDraftView(_OutreachContactMixin, APIView):
+    def patch(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachReviewIn, request.data, partial=True)
+        return self._one(outreach_svc.review_draft(self.tenant_id, self.actor, pk, data))
+
+    def delete(self, request: Request, pk) -> Response:
+        return self._one(outreach_svc.delete_draft(self.tenant_id, self.actor, pk))
+
+
+class OutreachResearchView(TenantScopedMixin, APIView):
+    """Company research; returns every listed person at that company (their status depends on it)."""
+
+    def patch(self, request: Request, pk) -> Response:
+        data = _valid(S.OutreachResearchIn, request.data, partial=True)
+        co = outreach_svc.update_research(self.tenant_id, self.actor, pk, data)
+        return Response(_outreach_rows(self.tenant_id, outreach_svc.contacts_of_company(self.tenant_id, co.id)))
+
+
 # ---------------- settings ----------------
 
 class SettingsView(TenantScopedMixin, APIView):
@@ -638,6 +728,8 @@ class SettingsView(TenantScopedMixin, APIView):
         team = [{"id": str(u.id), "name": u.display_name} for u in pipe_svc.team_users(self.tenant_id)]
         return {"team": team, "rules": pipe_svc.rules_for(self.tenant_id), "targets": s.targets,
                 "booth_followup": booth_svc.followup_defaults(self.tenant_id), "links": s.links or {}, "event_costs": s.event_costs or {},
+                "outreach": {"p1_user_id": (s.outreach or {}).get("p1_user_id", ""),
+                             "app_sender_ids": (s.outreach or {}).get("app_sender_ids", [])},
                 "integrations": {
                     "calendar": calendar_svc.enabled(), "calendar_invites": bool(settings.GOOGLE_DELEGATED_USER),
                     "recall": recall_svc.enabled(),
